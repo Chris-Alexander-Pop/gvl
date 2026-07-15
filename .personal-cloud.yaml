@@ -1,0 +1,19 @@
+name: gvl
+image: ghcr.io/chris-alexander-pop/gvl
+
+build:
+  context: .
+  dockerfile: deploy/Dockerfile
+
+service:
+  container: gvl
+  port: 8080
+  health_path: /health
+
+route:
+  exposure: private
+  # Set host via `pc ship --private` / your tailnet naming; override locally if needed.
+
+compose:
+  template: with-data-volume
+  env_file: /opt/personal-cloud/apps/gvl/.env
