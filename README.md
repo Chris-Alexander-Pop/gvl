@@ -94,15 +94,16 @@ pc validate
 pc ship --private --wait
 ```
 
-**Important:** Govee LAN UDP needs host networking. After ship, re-run the container with `--network host` (see [`deploy/compose.host-network.yaml`](deploy/compose.host-network.yaml)) or point the CLI at the VM Tailscale IP on port 8080:
+Use compose template **`with-data-volume-host`** (already set in `.personal-cloud.yaml`) so the daemon stays on the host network across ships — required for Govee LAN UDP.
+
+Point the CLI at the private route or the VM Tailscale IP on port 8080:
 
 ```bash
-gvl config set-url http://100.x.x.x:8080
+gvl config set-url http://100.x.x.x:8080   # or https://gvl.<your-tailnet>
 gvl config set-token <same-as-GVL_TOKEN>
 gvl schedule wizard
 ```
 
-Private Caddy hostnames (e.g. `gvl.<tailnet>`) only work if that name resolves on your client (MagicDNS / hosts). The Tailscale IP URL always works when `gvld` uses host networking.
 ## API sketch
 
 | Method | Path | Notes |

@@ -15,5 +15,5 @@ route:
   # Set host via `pc ship --private` / your tailnet naming; override locally if needed.
 
 compose:
-  template: with-data-volume
+  template: with-data-volume-host
   env_file: /opt/personal-cloud/apps/gvl/.env
