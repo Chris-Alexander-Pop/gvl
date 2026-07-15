@@ -69,9 +69,11 @@ Device IPs and tokens stay in env / local config — never commit them.
 
 ## Docker
 
+Govee replies on UDP, so **host networking** (or equivalent LAN access) is required:
+
 ```bash
 docker build -f deploy/Dockerfile -t gvl .
-docker run --rm -p 8080:8080 \
+docker run --rm --network host \
   -e GVL_DEVICE_IP=192.0.2.10 \
   -e GVL_TOKEN=secret \
   -e GVL_TZ=UTC \
@@ -79,7 +81,7 @@ docker run --rm -p 8080:8080 \
   gvl
 ```
 
-Note: the container needs **UDP access** to the light (host networking or equivalent may be required depending on your setup).
+Bridge networking usually breaks status/discovery because UDP replies never reach the container.
 
 ## Personal cloud (`pc`)
 
@@ -92,14 +94,15 @@ pc validate
 pc ship --private --wait
 ```
 
-Then:
+**Important:** Govee LAN UDP needs host networking. After ship, re-run the container with `--network host` (see [`deploy/compose.host-network.yaml`](deploy/compose.host-network.yaml)) or point the CLI at the VM Tailscale IP on port 8080:
 
 ```bash
-gvl config set-url https://<your-private-host>
+gvl config set-url http://100.x.x.x:8080
 gvl config set-token <same-as-GVL_TOKEN>
 gvl schedule wizard
 ```
 
+Private Caddy hostnames (e.g. `gvl.<tailnet>`) only work if that name resolves on your client (MagicDNS / hosts). The Tailscale IP URL always works when `gvld` uses host networking.
 ## API sketch
 
 | Method | Path | Notes |

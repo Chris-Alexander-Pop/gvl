@@ -1,0 +1,32 @@
+# Host-network override for Govee LAN UDP
+#
+# After `pc ship`, the default bridge compose cannot receive Govee UDP replies.
+# On the VM, either:
+#
+#   docker stop gvl && docker rm gvl
+#   docker run -d --name gvl --restart unless-stopped --network host \
+#     --env-file /opt/personal-cloud/apps/gvl/.env \
+#     -v /opt/personal-cloud/data/gvl:/data \
+#     ghcr.io/chris-alexander-pop/gvl:<tag>
+#
+# Or replace apps/gvl/compose.yaml with this file (requires sudo if root-owned)
+# and `docker compose up -d --force-recreate`. Point Caddy at 172.17.0.1:8080.
+
+name: gvl
+
+services:
+  app:
+    image: ${IMAGE}:${IMAGE_TAG}
+    container_name: ${SERVICE_CONTAINER}
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ${DATA_HOST_PATH}:/data
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/${SERVICE_PORT}' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
