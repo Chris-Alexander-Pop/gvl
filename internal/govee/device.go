@@ -80,7 +80,17 @@ func (c *Client) send(cmd string, data any) error {
 	return err
 }
 
-// Turn sets power on (true) or off (false).
+// sendBurst sends the same UDP command twice. Govee bulbs often drop the first
+// packet after idle; a quick repeat is cheap and makes interactive control reliable.
+func (c *Client) sendBurst(cmd string, data any) error {
+	if err := c.send(cmd, data); err != nil {
+		return err
+	}
+	time.Sleep(40 * time.Millisecond)
+	return c.send(cmd, data)
+}
+
+// Turn sets power on (true) or off (false). Single datagram — prefer ExecTurn for CLI.
 func (c *Client) Turn(on bool) error {
 	v := 0
 	if on {
@@ -110,11 +120,152 @@ func (c *Client) Temp(kelvin int) error {
 	})
 }
 
-// Status queries device status.
+func turnPayload(on bool) map[string]int {
+	v := 0
+	if on {
+		v = 1
+	}
+	return map[string]int{"value": v}
+}
+
+// ExecTurn turns the light on/off, retries if status shows it did not take, and
+// returns the confirmed device status.
+func (c *Client) ExecTurn(on bool) (*Status, error) {
+	want := 0
+	if on {
+		want = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := c.sendBurst("turn", turnPayload(on)); err != nil {
+			return nil, err
+		}
+		time.Sleep(settleDelay(attempt))
+		st, err := c.Status(1500 * time.Millisecond)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if st.OnOff == want {
+			return st, nil
+		}
+		lastErr = fmt.Errorf("device still %s after turn", powerWord(st.OnOff))
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("turn did not take effect")
+	}
+	return nil, lastErr
+}
+
+// ExecBrightness sets brightness and returns a fresh status.
+func (c *Client) ExecBrightness(v int) (*Status, error) {
+	return c.execControl(func() error { return c.PushBrightness(v) })
+}
+
+// ExecColor sets RGB color and returns a fresh status.
+func (c *Client) ExecColor(rgb RGB) (*Status, error) {
+	return c.execControl(func() error { return c.PushColor(rgb) })
+}
+
+// ExecTemp sets color temperature and returns a fresh status.
+func (c *Client) ExecTemp(kelvin int) (*Status, error) {
+	return c.execControl(func() error { return c.PushTemp(kelvin) })
+}
+
+// PushTurn sends a turn command twice without waiting for status (chain steps).
+func (c *Client) PushTurn(on bool) error {
+	return c.sendBurst("turn", turnPayload(on))
+}
+
+// PushBrightness sends brightness twice without waiting for status.
+func (c *Client) PushBrightness(v int) error {
+	return c.sendBurst("brightness", map[string]int{"value": ClampBrightness(v)})
+}
+
+// PushColor sends color twice without waiting for status.
+func (c *Client) PushColor(rgb RGB) error {
+	return c.sendBurst("colorwc", map[string]any{
+		"color":            map[string]int{"r": rgb.R, "g": rgb.G, "b": rgb.B},
+		"colorTemInKelvin": 0,
+	})
+}
+
+// PushTemp sends color temperature twice without waiting for status.
+func (c *Client) PushTemp(kelvin int) error {
+	return c.sendBurst("colorwc", map[string]any{
+		"color":            map[string]int{"r": 0, "g": 0, "b": 0},
+		"colorTemInKelvin": kelvin,
+	})
+}
+
+func (c *Client) execControl(send func() error) (*Status, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := send(); err != nil {
+			return nil, err
+		}
+		time.Sleep(settleDelay(attempt))
+		st, err := c.Status(1500 * time.Millisecond)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return st, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no response from device")
+	}
+	return nil, lastErr
+}
+
+func settleDelay(attempt int) time.Duration {
+	switch attempt {
+	case 0:
+		return 200 * time.Millisecond
+	case 1:
+		return 350 * time.Millisecond
+	default:
+		return 500 * time.Millisecond
+	}
+}
+
+func powerWord(onOff int) string {
+	if onOff != 0 {
+		return "on"
+	}
+	return "off"
+}
+
+// Status queries device status, retrying within timeout (UDP replies are flaky after idle).
 func (c *Client) Status(timeout time.Duration) (*Status, error) {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		remaining := time.Until(deadline)
+		if remaining < 150*time.Millisecond {
+			break
+		}
+		perTry := 800 * time.Millisecond
+		if remaining < perTry {
+			perTry = remaining
+		}
+		st, err := c.statusOnce(perTry)
+		if err == nil {
+			return st, nil
+		}
+		lastErr = err
+		time.Sleep(60 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no response from device")
+	}
+	return nil, lastErr
+}
+
+func (c *Client) statusOnce(timeout time.Duration) (*Status, error) {
 	pc, err := listenUDP(timeout)
 	if err != nil {
 		return nil, err

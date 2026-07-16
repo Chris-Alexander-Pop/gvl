@@ -87,12 +87,36 @@ func (c *Client) Status() (*govee.Status, string, error) {
 
 // DeviceCmd sends a simple device command.
 func (c *Client) DeviceCmd(cmd string, payload map[string]any) (*govee.Status, error) {
-	var st govee.Status
 	body := map[string]any{"cmd": cmd}
 	for k, v := range payload {
 		body[k] = v
 	}
-	if err := c.do(http.MethodPost, "/v1/device", body, &st); err != nil {
+	var raw json.RawMessage
+	if err := c.do(http.MethodPost, "/v1/device", body, &raw); err != nil {
+		return nil, err
+	}
+	st, err := decodeDeviceStatus(raw)
+	if err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// decodeDeviceStatus unmarshals a /v1/device response. Older daemons returned
+// {"ok":true} when status timed out; that must not be treated as a real Status
+// (all-zero → fake "off / 0% / #000000").
+func decodeDeviceStatus(raw json.RawMessage) (*govee.Status, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, err
+	}
+	if _, hasOK := probe["ok"]; hasOK {
+		if _, hasOnOff := probe["onOff"]; !hasOnOff {
+			return nil, fmt.Errorf("command acknowledged but no status from device")
+		}
+	}
+	var st govee.Status
+	if err := json.Unmarshal(raw, &st); err != nil {
 		return nil, err
 	}
 	return &st, nil

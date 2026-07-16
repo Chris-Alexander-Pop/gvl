@@ -135,35 +135,32 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	cmd, _ := body["cmd"].(string)
 	s.runner.Stop()
-	var err error
+	var (
+		st  *govee.Status
+		err error
+	)
 	switch cmd {
 	case "on":
-		err = s.client.Turn(true)
+		st, err = s.client.ExecTurn(true)
 	case "off":
-		err = s.client.Turn(false)
+		st, err = s.client.ExecTurn(false)
 	case "brightness":
 		v, _ := asInt(body["value"])
-		err = s.client.Brightness(v)
+		st, err = s.client.ExecBrightness(v)
 	case "color":
 		var rgb govee.RGB
 		b, _ := json.Marshal(body["color"])
 		_ = json.Unmarshal(b, &rgb)
-		err = s.client.Color(rgb)
+		st, err = s.client.ExecColor(rgb)
 	case "temp":
 		v, _ := asInt(body["value"])
-		err = s.client.Temp(v)
+		st, err = s.client.ExecTemp(v)
 	default:
 		http.Error(w, "unknown cmd", http.StatusBadRequest)
 		return
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	time.Sleep(200 * time.Millisecond)
-	st, err := s.client.Status(2 * time.Second)
-	if err != nil {
-		writeJSON(w, 200, map[string]any{"ok": true})
 		return
 	}
 	writeJSON(w, 200, st)

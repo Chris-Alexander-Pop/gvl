@@ -292,34 +292,49 @@ func deviceCmd(cmdName string, payload map[string]any, wantStatus bool) (*govee.
 		return nil, "", fmt.Errorf("no device IP — run gvl discover or set --address / GVL_DEVICE_IP")
 	}
 	localModeStop()
-	var err error
+	if !wantStatus {
+		var err error
+		switch cmdName {
+		case "on":
+			err = c.PushTurn(true)
+		case "off":
+			err = c.PushTurn(false)
+		case "brightness":
+			v, _ := payload["value"].(int)
+			err = c.PushBrightness(v)
+		case "color":
+			rgb, _ := payload["color"].(govee.RGB)
+			err = c.PushColor(rgb)
+		case "temp":
+			v, _ := payload["value"].(int)
+			err = c.PushTemp(v)
+		default:
+			err = fmt.Errorf("unknown command %q", cmdName)
+		}
+		return nil, c.IP, err
+	}
+	var (
+		st  *govee.Status
+		err error
+	)
 	switch cmdName {
 	case "on":
-		err = c.Turn(true)
+		st, err = c.ExecTurn(true)
 	case "off":
-		err = c.Turn(false)
+		st, err = c.ExecTurn(false)
 	case "brightness":
 		v, _ := payload["value"].(int)
-		err = c.Brightness(v)
+		st, err = c.ExecBrightness(v)
 	case "color":
 		rgb, _ := payload["color"].(govee.RGB)
-		err = c.Color(rgb)
+		st, err = c.ExecColor(rgb)
 	case "temp":
 		v, _ := payload["value"].(int)
-		err = c.Temp(v)
+		st, err = c.ExecTemp(v)
+	default:
+		err = fmt.Errorf("unknown command %q", cmdName)
 	}
 	if err != nil {
-		return nil, "", err
-	}
-	if !wantStatus {
-		return nil, c.IP, nil
-	}
-	time.Sleep(200 * time.Millisecond)
-	st, err := c.Status(2 * time.Second)
-	if err != nil {
-		if !flagQuiet {
-			fmt.Fprintf(os.Stderr, "sent command to %s, but got no status reply\n", c.IP)
-		}
 		return nil, "", err
 	}
 	return st, c.IP, nil
