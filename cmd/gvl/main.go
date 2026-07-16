@@ -9,6 +9,7 @@ import (
 	"github.com/Chris-Alexander-Pop/gvl/internal/config"
 	"github.com/Chris-Alexander-Pop/gvl/internal/govee"
 	"github.com/Chris-Alexander-Pop/gvl/internal/mode"
+	"github.com/Chris-Alexander-Pop/gvl/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -37,9 +38,22 @@ func init() {
 
 	rootCmd.AddCommand(
 		discoverCmd, statusCmd, presetsCmd, onCmd, offCmd, stopCmd,
-		brightCmd, brightnessCmd, colorCmd, tempCmd, modeCmd,
+		brightCmd, brightnessCmd, colorCmd, colorUSCmd, setCmd, tempCmd, modeCmd,
 		scheduleCmd, configCmd, completionCmd,
 	)
+
+	// Hidden exact-match aliases — work when typed, never clutter tab/help.
+	brightnessCmd.Hidden = true
+	colorUSCmd.Hidden = true
+
+	defaultHelp := rootCmd.HelpFunc()
+	rootCmd.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if c == rootCmd {
+			fmt.Println(ui.FormatHome())
+			return
+		}
+		defaultHelp(c, args)
+	})
 }
 
 func loadConfig() {
@@ -65,19 +79,10 @@ func loadConfig() {
 var rootCmd = &cobra.Command{
 	Use:   "gvl",
 	Short: "Control Govee lights over LAN (and schedules via gvld)",
-	Long: `gvl controls Govee LAN lights and the optional gvld schedule daemon.
-
-Direct LAN (no daemon):
-  gvl discover
-  gvl on
-  gvl color blue
-  gvl temp warm
-  gvl mode rainbow
-
-Daemon schedules (set url/token via gvl config or GVL_URL / GVL_TOKEN):
-  gvl schedule wizard
-  gvl schedule list
-  gvl schedule run-now weekday-wake`,
+	Long:  "Control Govee LAN lights and the optional gvld schedule daemon.",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println(ui.FormatHome())
+	},
 }
 
 func api() *client.Client {
@@ -103,7 +108,7 @@ func emitStatus(st *govee.Status, ip string) {
 		fmt.Printf("%s\n", mustJSON(st))
 		return
 	}
-	fmt.Println(govee.FormatStatus(st, ip))
+	fmt.Println(ui.FormatStatus(st, ip))
 }
 
 func mustJSON(v any) string {
@@ -203,65 +208,88 @@ var stopCmd = &cobra.Command{
 }
 
 var brightCmd = &cobra.Command{
-	Use:   "bright [0-100]",
-	Short: "Alias for brightness",
-	Args:  cobra.ExactArgs(1),
-	RunE:  brightnessRun,
+	Use:   "bright [0-100] [setting value...]",
+	Short: "Set brightness 0–100",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return applyLeading("bright", args)
+	},
 }
 
+// brightnessCmd is a hidden exact-match alias for bright (not shown in tab/help).
 var brightnessCmd = &cobra.Command{
-	Use:   "brightness [0-100]",
-	Short: "Set brightness 0-100",
-	Args:  cobra.ExactArgs(1),
-	RunE:  brightnessRun,
-}
-
-func brightnessRun(cmd *cobra.Command, args []string) error {
-	var v int
-	if _, err := fmt.Sscanf(args[0], "%d", &v); err != nil || v < 0 || v > 100 {
-		return fmt.Errorf("brightness must be 0-100")
-	}
-	return simpleDevice("brightness", map[string]any{"value": v})
+	Use:   "brightness [0-100] [setting value...]",
+	Short: "Set brightness 0–100",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return applyLeading("bright", args)
+	},
 }
 
 var colorCmd = &cobra.Command{
-	Use:   "color [name|#hex|r,g,b]",
-	Short: "Set color",
-	Args:  cobra.ExactArgs(1),
+	Use:   "colour [name|#hex|r,g,b] [setting value...]",
+	Short: "Set colour",
+	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		rgb, err := govee.ParseColor(args[0])
-		if err != nil {
-			return err
-		}
-		return simpleDevice("color", map[string]any{"color": rgb})
+		return applyLeading("color", args)
+	},
+}
+
+// colorUSCmd is a hidden exact-match alias for colour.
+var colorUSCmd = &cobra.Command{
+	Use:   "color [name|#hex|r,g,b] [setting value...]",
+	Short: "Set colour",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return applyLeading("color", args)
+	},
+}
+
+var setCmd = &cobra.Command{
+	Use:   "set [setting value...]",
+	Short: "Apply several settings in one go",
+	Long: `Apply chained light settings. Keys: colour, bright, temp, on, off.
+
+  gvl set colour red bright 40
+  gvl set on temp warm bright 25
+  gvl set colour #ff8800 bright 60`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return applySettings(args)
 	},
 }
 
 var tempCmd = &cobra.Command{
-	Use:   "temp [preset|kelvin]",
-	Short: "Set color temperature",
-	Args:  cobra.ExactArgs(1),
+	Use:   "temp [preset|kelvin] [setting value...]",
+	Short: "Set colour temperature",
+	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		k, err := govee.ParseTemp(args[0])
-		if err != nil {
-			return err
-		}
-		return simpleDevice("temp", map[string]any{"value": k})
+		return applyLeading("temp", args)
 	},
 }
 
 func simpleDevice(cmdName string, payload map[string]any) error {
+	st, ip, err := deviceCmd(cmdName, payload, true)
+	if err != nil {
+		return err
+	}
+	emitStatus(st, ip)
+	return nil
+}
+
+// deviceCmd sends one device command. When wantStatus is false (local LAN only),
+// skips the status poll — used for intermediate steps in a chain.
+func deviceCmd(cmdName string, payload map[string]any, wantStatus bool) (*govee.Status, string, error) {
 	if useDaemon() {
 		st, err := api().DeviceCmd(cmdName, payload)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
-		emitStatus(st, "")
-		return nil
+		return st, "", nil
 	}
 	c := deviceClient()
 	if c.IP == "" {
-		return fmt.Errorf("no device IP — run gvl discover or set --address / GVL_DEVICE_IP")
+		return nil, "", fmt.Errorf("no device IP — run gvl discover or set --address / GVL_DEVICE_IP")
 	}
 	localModeStop()
 	var err error
@@ -281,7 +309,10 @@ func simpleDevice(cmdName string, payload map[string]any) error {
 		err = c.Temp(v)
 	}
 	if err != nil {
-		return err
+		return nil, "", err
+	}
+	if !wantStatus {
+		return nil, c.IP, nil
 	}
 	time.Sleep(200 * time.Millisecond)
 	st, err := c.Status(2 * time.Second)
@@ -289,10 +320,9 @@ func simpleDevice(cmdName string, payload map[string]any) error {
 		if !flagQuiet {
 			fmt.Fprintf(os.Stderr, "sent command to %s, but got no status reply\n", c.IP)
 		}
-		return err
+		return nil, "", err
 	}
-	emitStatus(st, c.IP)
-	return nil
+	return st, c.IP, nil
 }
 
 // localRunner is used for direct-LAN animated modes.
@@ -305,8 +335,9 @@ func localModeStop() {
 }
 
 var presetsCmd = &cobra.Command{
-	Use:   "presets",
-	Short: "List colors, temperatures, modes",
+	Use:     "presets",
+	Short:   "List colours, temperatures, modes (with swatches)",
+	Aliases: []string{"colours", "colors", "aliases"},
 	Run: func(cmd *cobra.Command, args []string) {
 		if flagJSON {
 			fmt.Println(mustJSON(map[string]any{
@@ -316,33 +347,7 @@ var presetsCmd = &cobra.Command{
 			}))
 			return
 		}
-		fmt.Println("colors")
-		for _, name := range sortedMapKeys(govee.NamedColors) {
-			c := govee.NamedColors[name]
-			fmt.Printf("  %-12s #%02x%02x%02x\n", name, c.R, c.G, c.B)
-		}
-		fmt.Println("\ntemperatures")
-		for _, name := range sortedMapKeys(govee.TempPresets) {
-			fmt.Printf("  %-12s %dK\n", name, govee.TempPresets[name])
-		}
-		fmt.Println("\nmodes")
-		for _, name := range mode.Names() {
-			fmt.Printf("  %-12s %s\n", name, mode.Help[name])
-		}
+		fmt.Println(ui.FormatPresets())
 	},
 }
 
-func sortedMapKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[j] < keys[i] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
-	return keys
-}

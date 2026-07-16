@@ -37,6 +37,14 @@ func init() {
 		schedSetWakeCmd, schedSetSleepCmd,
 	)
 	configCmd.AddCommand(configShowCmd, configSetURLCmd, configSetTokenCmd, configSetAddrCmd)
+
+	for _, c := range []*cobra.Command{schedSetWakeCmd, schedSetSleepCmd} {
+		_ = c.RegisterFlagCompletionFunc("from-color", completeColorFlag)
+		_ = c.RegisterFlagCompletionFunc("to-color", completeColorFlag)
+		_ = c.RegisterFlagCompletionFunc("from-temp", completeTempFlag)
+		_ = c.RegisterFlagCompletionFunc("to-temp", completeTempFlag)
+		_ = c.RegisterFlagCompletionFunc("days", completeDaysFlag)
+	}
 }
 
 func requireAPI() error {
