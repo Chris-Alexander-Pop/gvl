@@ -35,12 +35,16 @@ gvl stop          # when using gvld; local modes exit with Ctrl+C
 Run `gvld` on a machine that can reach the light over UDP (usually the same LAN).
 
 ```bash
-export GVL_DEVICE_IP=192.0.2.10   # from gvl discover
+export GVL_DEVICE_IP=192.0.2.10   # bootstrap / last-known IP (from gvl discover)
+export GVL_DISCOVER_SUBNET=192.168.68.0/24  # optional; for DHCP moves across subnets
+export GVL_AUTO_DISCOVER=1        # default on; set 0 to disable
 export GVL_TOKEN=some-secret
 export GVL_TZ=America/New_York
 export GVL_DATA_DIR=./data
 gvld
 ```
+
+If the bulb’s DHCP address changes, `gvld` auto-rediscovers: multicast scan when on the same LAN, otherwise a unicast status probe of `GVL_DISCOVER_SUBNET` (or the /24 of the last IP). The new IP is stored in `$GVL_DATA_DIR/device.json` and reused on restart.
 
 Point the CLI at the daemon:
 
