@@ -208,9 +208,10 @@ func Due(e Entry, now time.Time) bool {
 
 // Engine evaluates schedules and runs ramps/modes.
 type Engine struct {
-	store  *Store
-	runner *mode.Runner
-	client *govee.Client
+	store      *Store
+	runner     *mode.Runner
+	client     *govee.Client
+	BeforeFire func() error // optional; e.g. auto-rediscover device IP
 }
 
 // NewEngine creates a schedule engine.
@@ -237,6 +238,11 @@ func (e *Engine) Tick(now time.Time) {
 
 // Fire runs a schedule entry immediately (does not mark last_fired unless via Tick).
 func (e *Engine) Fire(entry Entry) error {
+	if e.BeforeFire != nil {
+		if err := e.BeforeFire(); err != nil {
+			return err
+		}
+	}
 	switch entry.Kind {
 	case KindWake:
 		dur := time.Duration(entry.DurationMin) * time.Minute

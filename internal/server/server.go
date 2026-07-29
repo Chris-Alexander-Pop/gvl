@@ -17,21 +17,26 @@ import (
 
 // Options configures the daemon.
 type Options struct {
-	Listen   string
-	Token    string
-	DeviceIP string
-	DataDir  string
-	Timezone string
+	Listen         string
+	Token          string
+	DeviceIP       string
+	DataDir        string
+	Timezone       string
+	AutoDiscover   bool
+	DiscoverSubnet string
 }
 
 // Server is the gvld HTTP API.
 type Server struct {
-	opts   Options
-	client *govee.Client
-	runner *mode.Runner
-	store  *schedule.Store
-	engine *schedule.Engine
-	mu     sync.Mutex
+	opts              Options
+	client            *govee.Client
+	runner            *mode.Runner
+	store             *schedule.Store
+	engine            *schedule.Engine
+	device            govee.DeviceState
+	lastRediscover    time.Time
+	lastRediscoverErr error
+	mu                sync.Mutex
 }
 
 // New creates a server.
@@ -42,10 +47,22 @@ func New(opts Options) (*Server, error) {
 	if opts.DataDir == "" {
 		opts.DataDir = "/data"
 	}
+
+	state, err := govee.LoadDeviceState(opts.DataDir)
+	if err != nil {
+		log.Printf("gvld: load device.json: %v", err)
+		state = govee.DeviceState{}
+	}
+
 	ip := opts.DeviceIP
+	// Persisted IP wins over env when present (DHCP may have moved since last ship).
+	if state.IP != "" {
+		ip = state.IP
+	}
 	if ip == "" {
 		ip = govee.DefaultDeviceIP()
 	}
+
 	client := govee.NewClient(ip)
 	runner := mode.NewRunner(client)
 	store, err := schedule.NewStore(filepath.Join(opts.DataDir, "schedules.json"))
@@ -53,13 +70,19 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 	engine := schedule.NewEngine(store, runner, client)
-	return &Server{
+	s := &Server{
 		opts:   opts,
 		client: client,
 		runner: runner,
 		store:  store,
 		engine: engine,
-	}, nil
+		device: state,
+	}
+	if s.device.IP == "" && ip != "" {
+		s.device.IP = ip
+	}
+	engine.BeforeFire = s.ensureReachable
+	return s, nil
 }
 
 // Start begins the schedule loop and HTTP server (blocking).
@@ -78,7 +101,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/v1/schedules", s.auth(s.handleSchedules))
 	mux.HandleFunc("/v1/schedules/", s.auth(s.handleScheduleItem))
 
-	log.Printf("gvld listening on %s device=%s data=%s", s.opts.Listen, s.client.IP, s.opts.DataDir)
+	log.Printf("gvld listening on %s device=%s auto_discover=%v subnet=%q data=%s",
+		s.opts.Listen, s.client.IP, s.opts.AutoDiscover, s.opts.DiscoverSubnet, s.opts.DataDir)
 	return http.ListenAndServe(s.opts.Listen, mux)
 }
 
@@ -113,6 +137,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	st, err := s.client.Status(2 * time.Second)
 	if err != nil {
+		if rerr := s.recoverDevice(err); rerr == nil {
+			st, err = s.client.Status(2 * time.Second)
+		}
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -135,29 +164,38 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	cmd, _ := body["cmd"].(string)
 	s.runner.Stop()
-	var (
-		st  *govee.Status
-		err error
-	)
-	switch cmd {
-	case "on":
-		st, err = s.client.ExecTurn(true)
-	case "off":
-		st, err = s.client.ExecTurn(false)
-	case "brightness":
-		v, _ := asInt(body["value"])
-		st, err = s.client.ExecBrightness(v)
-	case "color":
-		var rgb govee.RGB
-		b, _ := json.Marshal(body["color"])
-		_ = json.Unmarshal(b, &rgb)
-		st, err = s.client.ExecColor(rgb)
-	case "temp":
-		v, _ := asInt(body["value"])
-		st, err = s.client.ExecTemp(v)
-	default:
+
+	run := func() (*govee.Status, error) {
+		switch cmd {
+		case "on":
+			return s.client.ExecTurn(true)
+		case "off":
+			return s.client.ExecTurn(false)
+		case "brightness":
+			v, _ := asInt(body["value"])
+			return s.client.ExecBrightness(v)
+		case "color":
+			var rgb govee.RGB
+			b, _ := json.Marshal(body["color"])
+			_ = json.Unmarshal(b, &rgb)
+			return s.client.ExecColor(rgb)
+		case "temp":
+			v, _ := asInt(body["value"])
+			return s.client.ExecTemp(v)
+		default:
+			return nil, errUnknownCmd
+		}
+	}
+
+	st, err := run()
+	if err == errUnknownCmd {
 		http.Error(w, "unknown cmd", http.StatusBadRequest)
 		return
+	}
+	if err != nil {
+		if rerr := s.recoverDevice(err); rerr == nil {
+			st, err = run()
+		}
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -165,6 +203,12 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, st)
 }
+
+var errUnknownCmd = errString("unknown cmd")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
 
 func asInt(v any) (int, bool) {
 	switch t := v.(type) {
@@ -203,6 +247,10 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mode name required", http.StatusBadRequest)
 		return
 	}
+	if err := s.ensureReachable(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	s.runner.StartMode(cfg)
 	writeJSON(w, 200, map[string]string{"mode": cfg.Name, "status": "started"})
 }
@@ -218,11 +266,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = govee.CacheIPs(devs)
-	if len(devs) > 0 && s.client.IP == "" {
-		s.mu.Lock()
-		s.client.IP = devs[0].IP
-		s.mu.Unlock()
-	}
+	s.adoptDiscovered(devs)
 	writeJSON(w, 200, devs)
 }
 
@@ -327,11 +371,13 @@ func (s *Server) handleScheduleItem(w http.ResponseWriter, r *http.Request) {
 // OptionsFromEnv builds options from environment.
 func OptionsFromEnv() Options {
 	return Options{
-		Listen:   envOr("GVL_LISTEN", ":8080"),
-		Token:    os.Getenv("GVL_TOKEN"),
-		DeviceIP: os.Getenv("GVL_DEVICE_IP"),
-		DataDir:  envOr("GVL_DATA_DIR", "/data"),
-		Timezone: envOr("GVL_TZ", "UTC"),
+		Listen:         envOr("GVL_LISTEN", ":8080"),
+		Token:          os.Getenv("GVL_TOKEN"),
+		DeviceIP:       os.Getenv("GVL_DEVICE_IP"),
+		DataDir:        envOr("GVL_DATA_DIR", "/data"),
+		Timezone:       envOr("GVL_TZ", "UTC"),
+		AutoDiscover:   envBoolDefaultTrue("GVL_AUTO_DISCOVER"),
+		DiscoverSubnet: os.Getenv("GVL_DISCOVER_SUBNET"),
 	}
 }
 
@@ -340,4 +386,15 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBoolDefaultTrue is true unless explicitly set to 0/false/off/no.
+func envBoolDefaultTrue(k string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(k)))
+	switch v {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
 }
