@@ -128,48 +128,54 @@ func turnPayload(on bool) map[string]int {
 	return map[string]int{"value": v}
 }
 
-// ExecTurn turns the light on/off, retries if status shows it did not take, and
-// returns the confirmed device status.
+// ExecTurn turns the light on/off, retries until status matches, and returns
+// the confirmed device status.
 func (c *Client) ExecTurn(on bool) (*Status, error) {
 	want := 0
 	if on {
 		want = 1
 	}
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if err := c.sendBurst("turn", turnPayload(on)); err != nil {
-			return nil, err
-		}
-		time.Sleep(settleDelay(attempt))
-		st, err := c.Status(1500 * time.Millisecond)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if st.OnOff == want {
-			return st, nil
-		}
-		lastErr = fmt.Errorf("device still %s after turn", powerWord(st.OnOff))
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("turn did not take effect")
-	}
-	return nil, lastErr
+	return c.execUntil(
+		func() error { return c.PushTurn(on) },
+		func(st *Status) bool { return st.OnOff == want },
+		func(st *Status) string {
+			return fmt.Sprintf("device still %s after turn", powerWord(st.OnOff))
+		},
+	)
 }
 
-// ExecBrightness sets brightness and returns a fresh status.
+// ExecBrightness sets brightness, retries until status matches, and returns status.
 func (c *Client) ExecBrightness(v int) (*Status, error) {
-	return c.execControl(func() error { return c.PushBrightness(v) })
+	want := ClampBrightness(v)
+	return c.execUntil(
+		func() error { return c.PushBrightness(want) },
+		func(st *Status) bool { return st.Brightness == want },
+		func(st *Status) string {
+			return fmt.Sprintf("brightness still %d%% (want %d%%)", st.Brightness, want)
+		},
+	)
 }
 
-// ExecColor sets RGB color and returns a fresh status.
+// ExecColor sets RGB color, retries until status matches, and returns status.
 func (c *Client) ExecColor(rgb RGB) (*Status, error) {
-	return c.execControl(func() error { return c.PushColor(rgb) })
+	return c.execUntil(
+		func() error { return c.PushColor(rgb) },
+		func(st *Status) bool { return colorMatches(st, rgb) },
+		func(st *Status) string {
+			return fmt.Sprintf("color still %s (want %s)", FormatColor(st.Color, st.ColorTemInKelvin), FormatColor(rgb, 0))
+		},
+	)
 }
 
-// ExecTemp sets color temperature and returns a fresh status.
+// ExecTemp sets color temperature, retries until status matches, and returns status.
 func (c *Client) ExecTemp(kelvin int) (*Status, error) {
-	return c.execControl(func() error { return c.PushTemp(kelvin) })
+	return c.execUntil(
+		func() error { return c.PushTemp(kelvin) },
+		func(st *Status) bool { return st.ColorTemInKelvin == kelvin },
+		func(st *Status) string {
+			return fmt.Sprintf("temp still %s (want %s)", FormatColor(st.Color, st.ColorTemInKelvin), FormatColor(RGB{}, kelvin))
+		},
+	)
 }
 
 // PushTurn sends a turn command twice without waiting for status (chain steps).
@@ -198,9 +204,12 @@ func (c *Client) PushTemp(kelvin int) error {
 	})
 }
 
-func (c *Client) execControl(send func() error) (*Status, error) {
+const execAttempts = 5
+
+// execUntil sends a command, reads status, and retries until ok(st) or attempts are exhausted.
+func (c *Client) execUntil(send func() error, ok func(*Status) bool, mismatch func(*Status) string) (*Status, error) {
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < execAttempts; attempt++ {
 		if err := send(); err != nil {
 			return nil, err
 		}
@@ -210,12 +219,20 @@ func (c *Client) execControl(send func() error) (*Status, error) {
 			lastErr = err
 			continue
 		}
-		return st, nil
+		if ok(st) {
+			return st, nil
+		}
+		lastErr = fmt.Errorf("%s", mismatch(st))
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no response from device")
 	}
 	return nil, lastErr
+}
+
+// colorMatches reports whether status reflects the requested RGB (not a colour-temp mode).
+func colorMatches(st *Status, want RGB) bool {
+	return st.ColorTemInKelvin == 0 && st.Color == want
 }
 
 func settleDelay(attempt int) time.Duration {
@@ -224,8 +241,10 @@ func settleDelay(attempt int) time.Duration {
 		return 200 * time.Millisecond
 	case 1:
 		return 350 * time.Millisecond
-	default:
+	case 2:
 		return 500 * time.Millisecond
+	default:
+		return 650 * time.Millisecond
 	}
 }
 

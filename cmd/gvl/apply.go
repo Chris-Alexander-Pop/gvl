@@ -88,9 +88,10 @@ func applySettings(tokens []string) error {
 
 	var last *govee.Status
 	var lastIP string
-	for n, s := range steps {
-		wantStatus := n == len(steps)-1
-		st, ip, err := deviceCmd(s.key, s.payload, wantStatus)
+	// Confirm every step against device status so dropped UDP packets get retried
+	// (colour/bright/temp used to return the first status without checking it matched).
+	for _, s := range steps {
+		st, ip, err := deviceCmd(s.key, s.payload, true)
 		if err != nil {
 			return err
 		}
