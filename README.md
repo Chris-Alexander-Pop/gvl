@@ -39,7 +39,7 @@ export GVL_DEVICE_IP=192.0.2.10   # bootstrap / last-known IP (from gvl discover
 export GVL_DISCOVER_SUBNET=192.0.2.0/24  # optional; for DHCP moves across subnets
 export GVL_AUTO_DISCOVER=1        # default on; set 0 to disable
 export GVL_TOKEN=some-secret
-export GVL_TZ=America/New_York
+export GVL_TZ=UTC
 export GVL_DATA_DIR=./data
 gvld
 ```
