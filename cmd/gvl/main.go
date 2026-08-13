@@ -33,11 +33,11 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&flagAddress, "address", "a", "", "device IP (direct LAN)")
 	rootCmd.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "no output")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "print JSON")
-	rootCmd.PersistentFlags().StringVar(&flagURL, "url", "", "daemon base URL (overrides config)")
+	rootCmd.PersistentFlags().StringVar(&flagURL, "url", "", "daemon base URL (overrides config; \"local\" = direct LAN)")
 	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "daemon bearer token")
 
 	rootCmd.AddCommand(
-		discoverCmd, statusCmd, presetsCmd, onCmd, offCmd, stopCmd,
+		discoverCmd, crawlCmd, statusCmd, presetsCmd, onCmd, offCmd, stopCmd,
 		brightCmd, brightnessCmd, colorCmd, colorUSCmd, setCmd, tempCmd, modeCmd,
 		scheduleCmd, configCmd, completionCmd,
 	)
@@ -62,7 +62,12 @@ func loadConfig() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 	}
-	if flagURL != "" {
+	switch flagURL {
+	case "":
+		// keep config / env
+	case "local", "-":
+		cfg.URL = "" // force direct LAN (ignore daemon)
+	default:
 		cfg.URL = flagURL
 	}
 	if flagToken != "" {

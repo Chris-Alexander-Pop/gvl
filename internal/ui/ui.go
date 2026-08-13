@@ -152,6 +152,7 @@ func FormatHome() string {
 
 	b.WriteString(section("light"))
 	b.WriteString(line("", "gvl on / off / status / stop", "") + "\n")
+	b.WriteString(line("", "gvl crawl", "find device on LAN (subnet probe)") + "\n")
 	b.WriteString(line("", "gvl colour red bright 10", "chain colour + brightness") + "\n")
 	b.WriteString(line("", "gvl temp warm bright 25", "kelvin presets or raw K") + "\n")
 	b.WriteString(line("", "gvl set on colour blue bright 50", "any order of settings") + "\n")

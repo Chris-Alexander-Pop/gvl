@@ -22,12 +22,14 @@ make install
 
 ```bash
 gvl discover
+gvl crawl --save          # unicast subnet probe when multicast misses
 gvl on
 gvl bright 40
 gvl color blue
 gvl temp warm
 gvl mode aurora
 gvl stop          # when using gvld; local modes exit with Ctrl+C
+gvl --url local off       # skip the daemon; talk UDP on this machine
 ```
 
 ## Daemon + schedules
