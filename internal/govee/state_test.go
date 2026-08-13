@@ -8,7 +8,7 @@ import (
 
 func TestDeviceStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	want := DeviceState{IP: "192.168.68.64", Device: "24:8D:5C:E7:53:E5:BB:BE", SKU: "H60A1"}
+	want := DeviceState{IP: "192.0.2.10", Device: "11:22:33:44:55:66:77:88", SKU: "H60A1"}
 	if err := SaveDeviceState(dir, want); err != nil {
 		t.Fatal(err)
 	}

@@ -19,16 +19,16 @@ func TestParseDays(t *testing.T) {
 }
 
 func TestDue(t *testing.T) {
-	loc, err := time.LoadLocation("America/New_York")
+	loc, err := time.LoadLocation("UTC")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Monday 2026-07-13 07:00:30 in NY
+	// Monday 2026-07-13 07:00:30 UTC
 	now := time.Date(2026, 7, 13, 7, 0, 30, 0, loc)
 	e := Entry{
 		Enabled:  true,
 		At:       "07:00",
-		Timezone: "America/New_York",
+		Timezone: "UTC",
 		Days:     []string{"mon"},
 	}
 	if !Due(e, now) {

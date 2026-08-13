@@ -63,7 +63,7 @@ var schedWizardCmd = &cobra.Command{
 		}
 		tz := os.Getenv("GVL_TZ")
 		if tz == "" {
-			tz = "America/New_York"
+			tz = "UTC"
 		}
 		entry, err := wizard.Run(tz)
 		if err != nil {
@@ -200,7 +200,7 @@ var (
 func addQuickFlags(c *cobra.Command, wake bool) {
 	c.Flags().IntVar(&setDur, "duration", 30, "ramp duration minutes")
 	c.Flags().StringVar(&setDays, "days", "weekdays", "weekdays|weekend|everyday|mon,tue,...")
-	c.Flags().StringVar(&setTZ, "tz", "America/New_York", "IANA timezone")
+	c.Flags().StringVar(&setTZ, "tz", "UTC", "IANA timezone")
 	c.Flags().StringVar(&setID, "id", "", "schedule id")
 	c.Flags().StringVar(&setFromCol, "from-color", "", "start color")
 	c.Flags().StringVar(&setFromTemp, "from-temp", "", "start temperature")
