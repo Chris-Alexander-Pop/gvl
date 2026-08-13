@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ type ProbeResult struct {
 	Status *Status
 }
 
-// SubnetFromIP returns the IPv4 /24 CIDR containing ip (e.g. 192.168.68.64 → 192.168.68.0/24).
+// SubnetFromIP returns the IPv4 /24 CIDR containing ip (e.g. 192.0.2.10 → 192.0.2.0/24).
 func SubnetFromIP(ip string) (string, error) {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
@@ -26,6 +27,105 @@ func SubnetFromIP(ip string) (string, error) {
 		return "", fmt.Errorf("not an IPv4 address %q", ip)
 	}
 	return fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2]), nil
+}
+
+// ParseCrawlTarget turns a CIDR or bare IPv4 into a probeable CIDR.
+// Bare IPs become the containing /24.
+func ParseCrawlTarget(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("empty target")
+	}
+	if strings.Contains(s, "/") {
+		if _, _, err := net.ParseCIDR(s); err != nil {
+			return "", fmt.Errorf("invalid CIDR %q: %w", s, err)
+		}
+		return s, nil
+	}
+	return SubnetFromIP(s)
+}
+
+// LocalIPv4CIDRs returns unicast IPv4 networks from up interfaces.
+// Skips loopback and Tailscale CGNAT (100.64/10). Prefixes wider than /16 are omitted
+// (ProbeSubnet refuses wild scans).
+func LocalIPv4CIDRs() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			v4 := ipNet.IP.To4()
+			if v4 == nil || v4.IsLoopback() || v4.IsLinkLocalUnicast() {
+				continue
+			}
+			if isTailscaleCGNAT(v4) {
+				continue
+			}
+			ones, bits := ipNet.Mask.Size()
+			if bits != 32 || ones < 16 {
+				continue
+			}
+			network := &net.IPNet{IP: v4.Mask(ipNet.Mask), Mask: ipNet.Mask}
+			cidr := network.String()
+			if _, ok := seen[cidr]; ok {
+				continue
+			}
+			seen[cidr] = struct{}{}
+			out = append(out, cidr)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isTailscaleCGNAT(ip net.IP) bool {
+	// 100.64.0.0/10
+	return ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127
+}
+
+// DefaultCrawlCIDRs picks subnets to probe when the user did not pass any.
+// Order: GVL_DISCOVER_SUBNET, /24 of hintIP, then local interface networks.
+func DefaultCrawlCIDRs(hintIP string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(cidr string) {
+		if cidr == "" {
+			return
+		}
+		if _, ok := seen[cidr]; ok {
+			return
+		}
+		seen[cidr] = struct{}{}
+		out = append(out, cidr)
+	}
+	if v := strings.TrimSpace(os.Getenv("GVL_DISCOVER_SUBNET")); v != "" {
+		if c, err := ParseCrawlTarget(v); err == nil {
+			add(c)
+		}
+	}
+	if hintIP != "" {
+		if c, err := SubnetFromIP(hintIP); err == nil {
+			add(c)
+		}
+	}
+	for _, c := range LocalIPv4CIDRs() {
+		add(c)
+	}
+	return out
 }
 
 // ProbeSubnet sends devStatus to every host in cidr and collects replies on UDP 4002.
