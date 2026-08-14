@@ -25,7 +25,10 @@ var scheduleCmd = &cobra.Command{
   gvl schedule disable ID
   gvl schedule delete ID
   gvl schedule run-now ID
-  gvl schedule set-wake 07:00 --duration 30`,
+  gvl schedule skip ID [--count N]
+  gvl schedule next ID --at 09:30 [--count N]
+  gvl schedule next ID --clear
+`,
 }
 
 func init() {
@@ -35,6 +38,7 @@ func init() {
 		schedWizardCmd, schedListCmd, schedShowCmd,
 		schedEnableCmd, schedDisableCmd, schedDeleteCmd, schedRunCmd,
 		schedSetWakeCmd, schedSetSleepCmd,
+		schedSkipCmd, schedNextCmd, schedUpcomingCmd,
 	)
 	configCmd.AddCommand(configShowCmd, configSetURLCmd, configSetTokenCmd, configSetAddrCmd)
 
@@ -89,14 +93,20 @@ var schedListCmd = &cobra.Command{
 			return err
 		}
 		if flagJSON {
-			fmt.Println(mustJSON(list))
+			now := time.Now()
+			out := make([]schedule.Entry, len(list))
+			for i, e := range list {
+				out[i] = schedule.Decorate(e, now)
+			}
+			fmt.Println(mustJSON(out))
 			return nil
 		}
 		if len(list) == 0 {
 			fmt.Println("no schedules")
 			return nil
 		}
-		fmt.Printf("%-20s %-6s %-5s %-12s %s\n", "ID", "KIND", "ON", "AT", "DAYS")
+		fmt.Printf("%-20s %-6s %-5s %-12s %-10s %s\n", "ID", "KIND", "ON", "AT", "NEXT", "DAYS")
+		now := time.Now()
 		for _, e := range list {
 			on := "no"
 			if e.Enabled {
@@ -106,7 +116,14 @@ var schedListCmd = &cobra.Command{
 			if len(e.Days) > 0 {
 				days = strings.Join(e.Days, ",")
 			}
-			fmt.Printf("%-20s %-6s %-5s %-12s %s\n", e.ID, e.Kind, on, e.At+" "+e.Timezone, days)
+			next := "—"
+			if when, note, ok := schedule.NextFire(e, now); ok {
+				next = when.Format("Mon 15:04")
+				if note != "" {
+					next += "*"
+				}
+			}
+			fmt.Printf("%-20s %-6s %-5s %-12s %-10s %s\n", e.ID, e.Kind, on, e.At+" "+e.Timezone, next, days)
 		}
 		return nil
 	},
@@ -124,7 +141,7 @@ var schedShowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Println(mustJSON(e))
+		fmt.Println(mustJSON(schedule.Decorate(e, time.Now())))
 		return nil
 	},
 }
@@ -290,6 +307,10 @@ func upsertQuick(kind schedule.Kind, at string) error {
 	if id == "" {
 		id = string(kind) + "-" + strings.ReplaceAll(at, ":", "")
 	}
+	var keep []schedule.Patch
+	if existing, err := api().GetSchedule(id); err == nil {
+		keep = existing.Next
+	}
 	entry := schedule.Entry{
 		ID:          id,
 		Enabled:     true,
@@ -301,6 +322,7 @@ func upsertQuick(kind schedule.Kind, at string) error {
 		From:        from,
 		To:          to,
 		EndOff:      kind == schedule.KindSleep && setEndOff,
+		Next:        keep,
 	}
 	if err := api().PutSchedule(entry); err != nil {
 		return err

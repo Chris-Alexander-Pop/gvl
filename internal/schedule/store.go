@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,11 @@ type Entry struct {
 	EndOff      bool      `json:"end_off,omitempty"` // sleep: turn off at end
 	Mode        string    `json:"mode,omitempty"`
 	LastFired   string    `json:"last_fired,omitempty"` // YYYY-MM-DD
+	Next        []Patch   `json:"next,omitempty"`
+
+	// Computed on read (not persisted).
+	Upcoming     string `json:"upcoming,omitempty"`
+	UpcomingNote string `json:"upcoming_note,omitempty"`
 }
 
 // Store persists schedules as JSON.
@@ -70,7 +76,7 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(s.list, "", "  ")
+	b, err := json.MarshalIndent(stripComputed(s.list), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -79,6 +85,16 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+func stripComputed(list []Entry) []Entry {
+	out := make([]Entry, len(list))
+	for i, e := range list {
+		e.Upcoming = ""
+		e.UpcomingNote = ""
+		out[i] = e
+	}
+	return out
 }
 
 // List returns a copy of all entries.
@@ -155,6 +171,68 @@ func (s *Store) MarkFired(id, day string) error {
 	return fmt.Errorf("schedule %q not found", id)
 }
 
+// MergePatches replaces next-occurrence patches by date.
+func (s *Store) MergePatches(id string, patches []Patch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.list {
+		if s.list[i].ID != id {
+			continue
+		}
+		byDate := map[string]Patch{}
+		for _, p := range s.list[i].Next {
+			byDate[p.Date] = p
+		}
+		for _, p := range patches {
+			if p.Date == "" {
+				return fmt.Errorf("patch missing date")
+			}
+			byDate[p.Date] = p
+		}
+		merged := make([]Patch, 0, len(byDate))
+		for _, p := range byDate {
+			merged = append(merged, p)
+		}
+		sort.Slice(merged, func(i, j int) bool { return merged[i].Date < merged[j].Date })
+		s.list[i].Next = merged
+		return s.saveLocked()
+	}
+	return fmt.Errorf("schedule %q not found", id)
+}
+
+// ClearNext removes all one-shot overrides.
+func (s *Store) ClearNext(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.list {
+		if s.list[i].ID == id {
+			s.list[i].Next = nil
+			return s.saveLocked()
+		}
+	}
+	return fmt.Errorf("schedule %q not found", id)
+}
+
+// RemovePatch deletes the override for one occurrence date.
+func (s *Store) RemovePatch(id, date string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.list {
+		if s.list[i].ID != id {
+			continue
+		}
+		next := s.list[i].Next[:0]
+		for _, p := range s.list[i].Next {
+			if p.Date != date {
+				next = append(next, p)
+			}
+		}
+		s.list[i].Next = next
+		return s.saveLocked()
+	}
+	return fmt.Errorf("schedule %q not found", id)
+}
+
 var weekdayNames = map[time.Weekday]string{
 	time.Monday:    "mon",
 	time.Tuesday:   "tue",
@@ -165,45 +243,9 @@ var weekdayNames = map[time.Weekday]string{
 	time.Sunday:    "sun",
 }
 
-// Due reports whether e should fire at now (within the tick window).
+// Due reports whether e should fire its ramp at now (within the tick window).
 func Due(e Entry, now time.Time) bool {
-	if !e.Enabled {
-		return false
-	}
-	loc := time.Local
-	if e.Timezone != "" {
-		if l, err := time.LoadLocation(e.Timezone); err == nil {
-			loc = l
-		}
-	}
-	local := now.In(loc)
-	dayKey := local.Format("2006-01-02")
-	if e.LastFired == dayKey {
-		return false
-	}
-	if len(e.Days) > 0 {
-		want := weekdayNames[local.Weekday()]
-		ok := false
-		for _, d := range e.Days {
-			if strings.EqualFold(d, want) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			return false
-		}
-	}
-	parts := strings.Split(e.At, ":")
-	if len(parts) != 2 {
-		return false
-	}
-	var hh, mm int
-	_, _ = fmt.Sscanf(e.At, "%d:%d", &hh, &mm)
-	target := time.Date(local.Year(), local.Month(), local.Day(), hh, mm, 0, 0, loc)
-	// Fire if we're within 90s after the scheduled time (ticker is ~30s).
-	diff := local.Sub(target)
-	return diff >= 0 && diff < 90*time.Second
+	return Classify(e, now).Kind == ActFire
 }
 
 // Engine evaluates schedules and runs ramps/modes.
@@ -222,17 +264,26 @@ func NewEngine(store *Store, runner *mode.Runner, client *govee.Client) *Engine 
 // Tick checks schedules once.
 func (e *Engine) Tick(now time.Time) {
 	for _, entry := range e.store.List() {
-		if !Due(entry, now) {
+		for _, date := range StalePatchDates(entry, now) {
+			_ = e.store.RemovePatch(entry.ID, date)
+		}
+		fresh, ok := e.store.Get(entry.ID)
+		if !ok {
 			continue
 		}
-		_ = e.Fire(entry)
-		loc := time.Local
-		if entry.Timezone != "" {
-			if l, err := time.LoadLocation(entry.Timezone); err == nil {
-				loc = l
+		act := Classify(fresh, now)
+		switch act.Kind {
+		case ActSkip:
+			_ = e.store.RemovePatch(fresh.ID, act.OccDate)
+			_ = e.store.MarkFired(fresh.ID, act.OccDate)
+		case ActFire:
+			toRun := ApplyPatch(fresh, act.Patch)
+			_ = e.Fire(toRun)
+			if act.Patch != nil {
+				_ = e.store.RemovePatch(fresh.ID, act.OccDate)
 			}
+			_ = e.store.MarkFired(fresh.ID, act.OccDate)
 		}
-		_ = e.store.MarkFired(entry.ID, now.In(loc).Format("2006-01-02"))
 	}
 }
 

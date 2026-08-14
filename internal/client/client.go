@@ -173,6 +173,55 @@ func (c *Client) RunSchedule(id string) error {
 	return c.do(http.MethodPost, "/v1/schedules/"+id+"/run", nil, nil)
 }
 
+func (c *Client) SkipNext(id string, count int, date string) (schedule.Entry, error) {
+	if count < 1 {
+		count = 1
+	}
+	body := map[string]any{"count": count}
+	if date != "" {
+		body["date"] = date
+	}
+	var e schedule.Entry
+	err := c.do(http.MethodPost, "/v1/schedules/"+id+"/skip", body, &e)
+	return e, err
+}
+
+func (c *Client) PatchNext(id string, spec schedule.Patch, count int) (schedule.Entry, error) {
+	if count < 1 {
+		count = 1
+	}
+	body := map[string]any{
+		"skip":         spec.Skip,
+		"at":           spec.At,
+		"date":         spec.Date,
+		"count":        count,
+		"next_day":     spec.NextDay,
+		"duration_min": spec.DurationMin,
+	}
+	if spec.From != nil {
+		body["from"] = spec.From
+	}
+	if spec.To != nil {
+		body["to"] = spec.To
+	}
+	if spec.EndOff != nil {
+		body["end_off"] = spec.EndOff
+	}
+	var e schedule.Entry
+	err := c.do(http.MethodPost, "/v1/schedules/"+id+"/next", body, &e)
+	return e, err
+}
+
+func (c *Client) ClearNext(id string) (schedule.Entry, error) {
+	var e schedule.Entry
+	err := c.do(http.MethodDelete, "/v1/schedules/"+id+"/next", nil, &e)
+	return e, err
+}
+
+func (c *Client) GetNext(id string) (schedule.Entry, error) {
+	return c.GetSchedule(id)
+}
+
 // Discover asks the daemon to discover devices.
 func (c *Client) Discover() ([]govee.Device, error) {
 	var list []govee.Device

@@ -59,7 +59,16 @@ gvl schedule wizard
 gvl schedule set-wake 07:00 --duration 30 --from-color blue --from-brightness 5 --to-temp daylight --to-brightness 55
 gvl schedule set-sleep 23:00 --duration 20 --end-off
 gvl schedule list
+gvl schedule upcoming
 gvl schedule run-now wake-0700
+
+# one-shot: recurring 07:00 / 23:00 stay put
+gvl schedule skip weekday-wake                 # sleep in; skip tomorrow morning
+gvl schedule skip weekday-wake --count 3       # skip the next 3 wakes
+gvl schedule next weekday-wake --at 09:30      # just tomorrow (or next occurrence)
+gvl schedule next weekday-sleep --at 01:00 --next-day
+gvl schedule next weekday-wake --at 09:00 --count 2 --duration 45 --to-temp daylight
+gvl schedule next weekday-wake --clear
 ```
 
 Wake ramps turn the light on and ease from a start look to an end look over N minutes.  
@@ -132,9 +141,11 @@ gvl schedule wizard
 | POST | `/v1/device` | `{"cmd":"on\|off\|brightness\|color\|temp",...}` |
 | POST | `/v1/mode` | mode config JSON |
 | POST | `/v1/stop` | stop mode/ramp |
-| GET/PUT | `/v1/schedules` | list / create |
+| GET/PUT | `/v1/schedules` | list / create (`upcoming` is computed) |
 | GET/PUT/DELETE | `/v1/schedules/{id}` | |
 | POST | `/v1/schedules/{id}/run` | fire now |
+| POST | `/v1/schedules/{id}/skip` | `{count, date}` skip next occurrence(s) |
+| GET/POST/DELETE | `/v1/schedules/{id}/next` | one-shot override (time / look / skip) |
 
 ## License
 
