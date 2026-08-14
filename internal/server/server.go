@@ -298,7 +298,13 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, 200, s.store.List())
+		now := time.Now()
+		list := s.store.List()
+		out := make([]schedule.Entry, len(list))
+		for i, e := range list {
+			out[i] = schedule.Decorate(e, now)
+		}
+		writeJSON(w, 200, out)
 	case http.MethodPost, http.MethodPut:
 		var e schedule.Entry
 		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
@@ -342,7 +348,7 @@ func (s *Server) handleScheduleItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, 200, e)
+		writeJSON(w, 200, schedule.Decorate(e, time.Now()))
 	case action == "" && r.Method == http.MethodPut:
 		var e schedule.Entry
 		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
@@ -388,9 +394,99 @@ func (s *Server) handleScheduleItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, map[string]string{"ran": id})
+	case action == "skip" && r.Method == http.MethodPost:
+		s.handleSkipNext(w, r, id)
+	case action == "next" && r.Method == http.MethodGet:
+		s.handleGetNext(w, id)
+	case action == "next" && r.Method == http.MethodPost:
+		s.handlePostNext(w, r, id)
+	case action == "next" && r.Method == http.MethodDelete:
+		if err := s.store.ClearNext(id); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		e, _ := s.store.Get(id)
+		writeJSON(w, 200, schedule.Decorate(e, time.Now()))
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+func (s *Server) handleGetNext(w http.ResponseWriter, id string) {
+	e, ok := s.store.Get(id)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	e = schedule.Decorate(e, time.Now())
+	writeJSON(w, 200, map[string]any{
+		"id":            e.ID,
+		"recurring_at":  e.At,
+		"upcoming":      e.Upcoming,
+		"upcoming_note": e.UpcomingNote,
+		"next":          e.Next,
+	})
+}
+
+func (s *Server) handleSkipNext(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		Count int    `json:"count"`
+		Date  string `json:"date"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	s.applyNext(w, id, schedule.Patch{Skip: true, Date: body.Date}, body.Count)
+}
+
+func (s *Server) handlePostNext(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		Skip        bool       `json:"skip"`
+		At          string     `json:"at"`
+		Date        string     `json:"date"`
+		Count       int        `json:"count"`
+		NextDay     bool       `json:"next_day"`
+		DurationMin int        `json:"duration_min"`
+		From        *mode.Look `json:"from"`
+		To          *mode.Look `json:"to"`
+		EndOff      *bool      `json:"end_off"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.applyNext(w, id, schedule.Patch{
+		Skip:        body.Skip,
+		At:          body.At,
+		Date:        body.Date,
+		NextDay:     body.NextDay,
+		DurationMin: body.DurationMin,
+		From:        body.From,
+		To:          body.To,
+		EndOff:      body.EndOff,
+	}, body.Count)
+}
+
+func (s *Server) applyNext(w http.ResponseWriter, id string, spec schedule.Patch, count int) {
+	e, ok := s.store.Get(id)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	patches, err := schedule.BuildPatches(e, time.Now(), spec, count)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.store.MergePatches(id, patches); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	e, _ = s.store.Get(id)
+	writeJSON(w, 200, schedule.Decorate(e, time.Now()))
 }
 
 // OptionsFromEnv builds options from environment.
