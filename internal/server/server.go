@@ -37,6 +37,7 @@ type Server struct {
 	lastRediscover    time.Time
 	lastRediscoverErr error
 	mu                sync.Mutex
+	deviceMu          sync.Mutex
 }
 
 // New creates a server.
@@ -119,6 +120,18 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) lockDevice(op string) func() {
+	if !s.deviceMu.TryLock() {
+		log.Printf("gvld: %s waiting (device busy — overlapping commands used to fail on UDP :4002)", op)
+		s.deviceMu.Lock()
+	}
+	start := time.Now()
+	return func() {
+		log.Printf("gvld: %s %s", op, time.Since(start).Round(time.Millisecond))
+		s.deviceMu.Unlock()
+	}
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
@@ -135,6 +148,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	unlock := s.lockDevice("GET /v1/status")
+	defer unlock()
 	st, err := s.client.Status(2 * time.Second)
 	if err != nil {
 		if rerr := s.recoverDevice(err); rerr == nil {
@@ -164,6 +179,9 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	cmd, _ := body["cmd"].(string)
 	s.runner.Stop()
+
+	unlock := s.lockDevice("POST /v1/device " + cmd)
+	defer unlock()
 
 	run := func() (*govee.Status, error) {
 		switch cmd {
@@ -198,6 +216,7 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		log.Printf("gvld: device %s error: %v", cmd, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -230,6 +249,8 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.runner.Stop()
+	unlock := s.lockDevice("POST /v1/stop")
+	defer unlock()
 	writeJSON(w, 200, map[string]string{"status": "stopped"})
 }
 
@@ -247,6 +268,8 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mode name required", http.StatusBadRequest)
 		return
 	}
+	unlock := s.lockDevice("POST /v1/mode " + cfg.Name)
+	defer unlock()
 	if err := s.ensureReachable(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -260,6 +283,8 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	unlock := s.lockDevice("POST /v1/discover")
+	defer unlock()
 	devs, err := govee.Discover(3 * time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

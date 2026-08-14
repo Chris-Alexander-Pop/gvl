@@ -9,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/Chris-Alexander-Pop/gvl/internal/trace"
 )
 
 const (
@@ -42,8 +44,9 @@ type Status struct {
 
 // Client talks to a Govee light over LAN UDP.
 type Client struct {
-	IP string
-	mu sync.Mutex
+	IP   string
+	mu   sync.Mutex // single datagram
+	opMu sync.Mutex // status listen + exec (UDP 4002 is exclusive)
 }
 
 // NewClient returns a client for the given device IP.
@@ -135,7 +138,7 @@ func (c *Client) ExecTurn(on bool) (*Status, error) {
 	if on {
 		want = 1
 	}
-	return c.execUntil(
+	return c.execUntil("turn",
 		func() error { return c.PushTurn(on) },
 		func(st *Status) bool { return st.OnOff == want },
 		func(st *Status) string {
@@ -147,7 +150,7 @@ func (c *Client) ExecTurn(on bool) (*Status, error) {
 // ExecBrightness sets brightness, retries until status matches, and returns status.
 func (c *Client) ExecBrightness(v int) (*Status, error) {
 	want := ClampBrightness(v)
-	return c.execUntil(
+	return c.execUntil("brightness",
 		func() error { return c.PushBrightness(want) },
 		func(st *Status) bool { return st.Brightness == want },
 		func(st *Status) string {
@@ -158,7 +161,7 @@ func (c *Client) ExecBrightness(v int) (*Status, error) {
 
 // ExecColor sets RGB color, retries until status matches, and returns status.
 func (c *Client) ExecColor(rgb RGB) (*Status, error) {
-	return c.execUntil(
+	return c.execUntil("color",
 		func() error { return c.PushColor(rgb) },
 		func(st *Status) bool { return colorMatches(st, rgb) },
 		func(st *Status) string {
@@ -169,7 +172,7 @@ func (c *Client) ExecColor(rgb RGB) (*Status, error) {
 
 // ExecTemp sets color temperature, retries until status matches, and returns status.
 func (c *Client) ExecTemp(kelvin int) (*Status, error) {
-	return c.execUntil(
+	return c.execUntil("temp",
 		func() error { return c.PushTemp(kelvin) },
 		func(st *Status) bool { return st.ColorTemInKelvin == kelvin },
 		func(st *Status) string {
@@ -204,29 +207,55 @@ func (c *Client) PushTemp(kelvin int) error {
 	})
 }
 
+func (c *Client) lockOp(reason string) func() {
+	if !c.opMu.TryLock() {
+		trace.Printf("udp wait %s (busy)", reason)
+		c.opMu.Lock()
+		trace.Printf("udp acquired %s", reason)
+	}
+	start := time.Now()
+	return func() {
+		trace.Printf("udp %s held %s", reason, time.Since(start).Round(time.Millisecond))
+		c.opMu.Unlock()
+	}
+}
+
 const execAttempts = 5
 
 // execUntil sends a command, reads status, and retries until ok(st) or attempts are exhausted.
-func (c *Client) execUntil(send func() error, ok func(*Status) bool, mismatch func(*Status) string) (*Status, error) {
+func (c *Client) execUntil(name string, send func() error, ok func(*Status) bool, mismatch func(*Status) string) (*Status, error) {
+	unlock := c.lockOp("exec " + name)
+	defer unlock()
+
+	t0 := time.Now()
 	var lastErr error
 	for attempt := 0; attempt < execAttempts; attempt++ {
+		delay := settleDelay(attempt)
+		trace.Printf("exec %s attempt %d/%d settle=%s", name, attempt+1, execAttempts, delay)
 		if err := send(); err != nil {
+			trace.Printf("exec %s send: %v", name, err)
 			return nil, err
 		}
-		time.Sleep(settleDelay(attempt))
-		st, err := c.Status(1500 * time.Millisecond)
+		time.Sleep(delay)
+		st, err := c.statusLoop(1500 * time.Millisecond)
 		if err != nil {
+			trace.Printf("exec %s status: %v", name, err)
 			lastErr = err
 			continue
 		}
 		if ok(st) {
+			trace.Printf("exec %s ok attempt=%d total=%s look=%s %d%%",
+				name, attempt+1, time.Since(t0).Round(time.Millisecond),
+				FormatColor(st.Color, st.ColorTemInKelvin), st.Brightness)
 			return st, nil
 		}
 		lastErr = fmt.Errorf("%s", mismatch(st))
+		trace.Printf("exec %s mismatch: %v", name, lastErr)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no response from device")
 	}
+	trace.Printf("exec %s failed after %s: %v", name, time.Since(t0).Round(time.Millisecond), lastErr)
 	return nil, lastErr
 }
 
@@ -257,11 +286,18 @@ func powerWord(onOff int) string {
 
 // Status queries device status, retrying within timeout (UDP replies are flaky after idle).
 func (c *Client) Status(timeout time.Duration) (*Status, error) {
+	unlock := c.lockOp("status")
+	defer unlock()
+	return c.statusLoop(timeout)
+}
+
+func (c *Client) statusLoop(timeout time.Duration) (*Status, error) {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	tries := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining < 150*time.Millisecond {
@@ -271,10 +307,15 @@ func (c *Client) Status(timeout time.Duration) (*Status, error) {
 		if remaining < perTry {
 			perTry = remaining
 		}
+		tries++
 		st, err := c.statusOnce(perTry)
 		if err == nil {
+			trace.Printf("status ok try=%d remain=%s look=%s %d%% onOff=%d",
+				tries, remaining.Round(time.Millisecond),
+				FormatColor(st.Color, st.ColorTemInKelvin), st.Brightness, st.OnOff)
 			return st, nil
 		}
+		trace.Printf("status try=%d: %v", tries, err)
 		lastErr = err
 		time.Sleep(60 * time.Millisecond)
 	}
@@ -287,7 +328,7 @@ func (c *Client) Status(timeout time.Duration) (*Status, error) {
 func (c *Client) statusOnce(timeout time.Duration) (*Status, error) {
 	pc, err := listenUDP(timeout)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listen :%d: %w", ListenPort, err)
 	}
 	defer pc.Close()
 	if err := c.send("devStatus", map[string]any{}); err != nil {

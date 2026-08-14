@@ -5,9 +5,11 @@ import (
 	"os"
 
 	"github.com/Chris-Alexander-Pop/gvl/internal/server"
+	"github.com/Chris-Alexander-Pop/gvl/internal/trace"
 )
 
 func main() {
+	trace.InitFromEnv()
 	opts := server.OptionsFromEnv()
 	if opts.DataDir == "/data" {
 		if _, err := os.Stat("/data"); err != nil {

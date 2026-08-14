@@ -9,6 +9,7 @@ import (
 	"github.com/Chris-Alexander-Pop/gvl/internal/config"
 	"github.com/Chris-Alexander-Pop/gvl/internal/govee"
 	"github.com/Chris-Alexander-Pop/gvl/internal/mode"
+	"github.com/Chris-Alexander-Pop/gvl/internal/trace"
 	"github.com/Chris-Alexander-Pop/gvl/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -19,6 +20,7 @@ var (
 	flagJSON    bool
 	flagURL     string
 	flagToken   string
+	flagVerbose bool
 	cfg         config.Config
 )
 
@@ -35,6 +37,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "print JSON")
 	rootCmd.PersistentFlags().StringVar(&flagURL, "url", "", "daemon base URL (overrides config; \"local\" = direct LAN)")
 	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "", "daemon bearer token")
+	rootCmd.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "log UDP/HTTP timings to stderr (or set GVL_DEBUG=1)")
 
 	rootCmd.AddCommand(
 		discoverCmd, crawlCmd, statusCmd, presetsCmd, onCmd, offCmd, stopCmd,
@@ -57,6 +60,10 @@ func init() {
 }
 
 func loadConfig() {
+	trace.InitFromEnv()
+	if flagVerbose {
+		trace.Enable()
+	}
 	var err error
 	cfg, err = config.Load()
 	if err != nil {
@@ -285,6 +292,14 @@ func simpleDevice(cmdName string, payload map[string]any) error {
 // deviceCmd sends one device command. When wantStatus is false (local LAN only),
 // skips the status poll — used for intermediate steps in a chain.
 func deviceCmd(cmdName string, payload map[string]any, wantStatus bool) (*govee.Status, string, error) {
+	t0 := time.Now()
+	defer func() {
+		via := "lan"
+		if useDaemon() {
+			via = "gvld"
+		}
+		trace.Printf("cmd %s via=%s %s", cmdName, via, time.Since(t0).Round(time.Millisecond))
+	}()
 	if useDaemon() {
 		st, err := api().DeviceCmd(cmdName, payload)
 		if err != nil {
