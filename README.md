@@ -73,6 +73,19 @@ Sleep ramps dim toward a warm/low look and can power off at the end.
 
 Device IPs and tokens stay in env / local config — never commit them.
 
+## Debug / slow or failed commands
+
+Govee LAN is UDP. Each command **sends twice**, waits **200ms+** for the bulb to settle, then **polls status on UDP 4002** (up to 5 retries). A happy path is ~0.3–1s; a mismatch can take several seconds. Status listen binds port 4002 exclusively, so overlapping commands used to fail with `address already in use` or a stale colour mismatch.
+
+`gvld` now **serializes** device ops (later commands wait instead of colliding). CLI traces:
+
+```bash
+gvl -v colour blue
+GVL_DEBUG=1 gvl set on colour red bright 40
+```
+
+Logs go to stderr (`http POST /v1/device … 800ms`, `exec color attempt 1/5 settle=200ms`). `gvld` always logs one line per request; `GVL_DEBUG=1` adds UDP attempt detail. Redeploy `gvld` for the serialize fix to take effect on the daemon host.
+
 ## Docker
 
 Govee replies on UDP, so **host networking** (or equivalent LAN access) is required:

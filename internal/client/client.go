@@ -12,13 +12,14 @@ import (
 	"github.com/Chris-Alexander-Pop/gvl/internal/govee"
 	"github.com/Chris-Alexander-Pop/gvl/internal/mode"
 	"github.com/Chris-Alexander-Pop/gvl/internal/schedule"
+	"github.com/Chris-Alexander-Pop/gvl/internal/trace"
 )
 
 // Client talks to gvld over HTTP.
 type Client struct {
-	Base   string
-	Token  string
-	HTTP   *http.Client
+	Base  string
+	Token string
+	HTTP  *http.Client
 }
 
 // New creates an API client.
@@ -32,6 +33,8 @@ func New(base, token string) *Client {
 }
 
 func (c *Client) do(method, path string, body any, out any) error {
+	t0 := time.Now()
+	trace.Printf("http %s %s", method, path)
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -52,6 +55,7 @@ func (c *Client) do(method, path string, body any, out any) error {
 	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {
+		trace.Printf("http %s %s error after %s: %v", method, path, time.Since(t0).Round(time.Millisecond), err)
 		return err
 	}
 	defer res.Body.Close()
@@ -59,6 +63,7 @@ func (c *Client) do(method, path string, body any, out any) error {
 	if err != nil {
 		return err
 	}
+	trace.Printf("http %s %s %s %s (%dB)", method, path, res.Status, time.Since(t0).Round(time.Millisecond), len(data))
 	if res.StatusCode >= 300 {
 		return fmt.Errorf("%s: %s", res.Status, strings.TrimSpace(string(data)))
 	}

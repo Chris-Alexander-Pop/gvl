@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Chris-Alexander-Pop/gvl/internal/govee"
+	"github.com/Chris-Alexander-Pop/gvl/internal/trace"
 )
 
 // settingKeys are recognised tokens in a chained apply sequence.
@@ -90,7 +91,8 @@ func applySettings(tokens []string) error {
 	var lastIP string
 	// Confirm every step against device status so dropped UDP packets get retried
 	// (colour/bright/temp used to return the first status without checking it matched).
-	for _, s := range steps {
+	for i, s := range steps {
+		trace.Printf("apply step %d/%d %s", i+1, len(steps), s.key)
 		st, ip, err := deviceCmd(s.key, s.payload, true)
 		if err != nil {
 			return err
