@@ -120,6 +120,40 @@ func lerpLook(from, to Look, t float64) Look {
 	return Look{Color: &rgb, Brightness: b}
 }
 
+func looksEqual(a, b Look) bool {
+	if a.Brightness != b.Brightness || a.Temp != b.Temp {
+		return false
+	}
+	if a.Color == nil && b.Color == nil {
+		return true
+	}
+	if a.Color == nil || b.Color == nil {
+		return false
+	}
+	return *a.Color == *b.Color
+}
+
+const previewSamples = 400
+
+// PreviewLooks is the timed ramp sampled densely, with duplicate looks removed.
+// Used by Test Ramp: one confirmed Exec per distinct look, no wall-clock wait.
+func PreviewLooks(from, to Look) []Look {
+	out := make([]Look, 0, 64)
+	for i := 0; i <= previewSamples; i++ {
+		t := float64(i) / float64(previewSamples)
+		look := lerpLook(from, to, smoothstep(t))
+		if len(out) > 0 && looksEqual(out[len(out)-1], look) {
+			continue
+		}
+		out = append(out, look)
+	}
+	end := lerpLook(from, to, 1)
+	if len(out) == 0 || !looksEqual(out[len(out)-1], end) {
+		out = append(out, end)
+	}
+	return out
+}
+
 // RGBForLook returns the RGB used for blending (temp approximated when set).
 func RGBForLook(look Look) govee.RGB {
 	if look.Temp > 0 {
@@ -216,6 +250,47 @@ func (r *Runner) StartRamp(name string, from, to Look, duration time.Duration, e
 			log.Printf("gvl: ramp %s: %v", name, err)
 		}
 	}()
+}
+
+// StartPreview plays from→to as fast as the bulb confirms each look.
+func (r *Runner) StartPreview(name string, from, to Look, endOff bool) int {
+	frames := PreviewLooks(from, to)
+	ctx := r.start(name)
+	go func() {
+		defer r.clearIf(name)
+		if err := r.runPreview(ctx, name, frames, endOff); err != nil && ctx.Err() == nil {
+			log.Printf("gvl: preview %s: %v", name, err)
+		}
+	}()
+	return len(frames)
+}
+
+func (r *Runner) runPreview(ctx context.Context, name string, frames []Look, endOff bool) error {
+	log.Printf("gvl: preview %s frames=%d end_off=%v", name, len(frames), endOff)
+	t0 := time.Now()
+	for i, look := range frames {
+		if err := ctx.Err(); err != nil {
+			log.Printf("gvl: preview %s cancelled at %d/%d", name, i, len(frames))
+			return err
+		}
+		var err error
+		if i == 0 {
+			err = ApplyLook(r.client, look)
+		} else {
+			err = applyLookAppearance(r.client, look)
+		}
+		if err != nil {
+			return fmt.Errorf("frame %d/%d: %w", i+1, len(frames), err)
+		}
+	}
+	if endOff {
+		if _, err := r.client.ExecTurn(false); err != nil {
+			log.Printf("gvl: preview %s end-off failed: %v", name, err)
+			return err
+		}
+	}
+	log.Printf("gvl: preview %s done frames=%d in %s", name, len(frames), time.Since(t0).Round(time.Millisecond))
+	return nil
 }
 
 func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, duration time.Duration, endOff bool) error {

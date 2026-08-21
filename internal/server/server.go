@@ -394,6 +394,18 @@ func (s *Server) handleScheduleItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, map[string]string{"ran": id})
+	case action == "preview" && r.Method == http.MethodPost:
+		e, ok := s.store.Get(id)
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		n, err := s.engine.Preview(e)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"preview": id, "frames": n})
 	case action == "skip" && r.Method == http.MethodPost:
 		s.handleSkipNext(w, r, id)
 	case action == "next" && r.Method == http.MethodGet:
