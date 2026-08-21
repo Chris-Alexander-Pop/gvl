@@ -57,7 +57,7 @@ gvl config set-token some-secret
 gvl schedule wizard
 # or:
 gvl schedule set-wake 07:00 --duration 30 --from-color blue --from-brightness 5 --to-temp daylight --to-brightness 55
-gvl schedule set-sleep 23:00 --duration 20 --end-off
+gvl schedule set-sleep 23:00 --duration 20 --end-off --split 20
 gvl schedule list
 gvl schedule upcoming
 gvl schedule run-now wake-0700
@@ -79,6 +79,10 @@ The H60A1 white LEDs bottom out at **2700K** over LAN (the app’s 2200K mixes R
 warm-white; `colorwc` kelvin does not). Sleep targets below that — including candle
 1800K — switch to RGB orange so the evening ramp actually turns into a colour, then
 `end_off` if set.
+
+`--split 20` puts **20%** of the duration on the start look (white CCT) and **80%** on
+the end look (colour). Wake is the inverse: that percent is the start colour, the rest
+is white. Omit or `0` for automatic (kelvin-span, or 50/50 for colour→white).
 
 ## Networking options
 

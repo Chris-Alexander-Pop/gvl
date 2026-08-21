@@ -236,6 +236,7 @@ var (
 	setToB      int
 	setEndOff   bool
 	setID       string
+	setSplit    int
 )
 
 func addQuickFlags(c *cobra.Command, wake bool) {
@@ -249,6 +250,7 @@ func addQuickFlags(c *cobra.Command, wake bool) {
 	c.Flags().StringVar(&setToCol, "to-color", "", "end color")
 	c.Flags().StringVar(&setToTemp, "to-temp", "", "end temperature")
 	c.Flags().IntVar(&setToB, "to-brightness", -1, "end brightness")
+	c.Flags().IntVar(&setSplit, "split", -1, "percent of duration on the start look (1-99); rest is the other mode; -1 keep/auto")
 	if wake {
 		_ = c.Flags().Set("from-color", "blue")
 		// defaults applied in upsertQuick when empty; wake presets:
@@ -332,8 +334,17 @@ func upsertQuick(kind schedule.Kind, at string) error {
 		id = string(kind) + "-" + strings.ReplaceAll(at, ":", "")
 	}
 	var keep []schedule.Patch
+	existingSplit := 0
 	if existing, err := api().GetSchedule(id); err == nil {
 		keep = existing.Next
+		existingSplit = existing.SplitPct
+	}
+	split := existingSplit
+	if setSplit >= 0 {
+		split = setSplit
+	}
+	if split != 0 && (split < 1 || split > 99) {
+		return fmt.Errorf("split must be 1–99 (or 0 for auto)")
 	}
 	entry := schedule.Entry{
 		ID:          id,
@@ -346,6 +357,7 @@ func upsertQuick(kind schedule.Kind, at string) error {
 		From:        from,
 		To:          to,
 		EndOff:      kind == schedule.KindSleep && setEndOff,
+		SplitPct:    split,
 		Next:        keep,
 	}
 	if err := api().PutSchedule(entry); err != nil {

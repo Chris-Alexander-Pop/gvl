@@ -171,7 +171,7 @@ func FormatHome() string {
 	b.WriteString(section("schedule") + dim("  (needs gvld — gvl config set-url …)") + "\n")
 	b.WriteString(line("", "gvl schedule wizard", "interactive wake/sleep setup") + "\n")
 	b.WriteString(line("", "gvl schedule set-wake 07:00", "--duration 30 …") + "\n")
-	b.WriteString(line("", "gvl schedule set-sleep 23:00", "--end-off") + "\n")
+	b.WriteString(line("", "gvl schedule set-sleep 23:00", "--end-off --split 20") + "\n")
 	b.WriteString(line("", "gvl schedule list", "") + "\n")
 	b.WriteString(line("", "gvl schedule run-now ID", "fire immediately") + "\n")
 	b.WriteString(line("", "gvl schedule preview ID", "as-fast-as-confirmed test ramp") + "\n")
