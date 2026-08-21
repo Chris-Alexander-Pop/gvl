@@ -138,16 +138,14 @@ func ClampBrightness(v int) int {
 	return clamp(v, 0, 100)
 }
 
-// KelvinMin is the warmest colour-temp the H60A1 accepts over LAN.
-// Requests below this (including the "candle" 1800K preset) are ignored;
-// the bulb stays at 2700K. Re-sending colorwc in that state is a visible pulse.
+// KelvinMin is the warmest CCT the H60A1 white LEDs accept over LAN.
+// The box rates 2200–6500K (app mixes RGB into WW to fake 2200). Raw
+// colorwc kelvin 1800–2500 is ignored and status stays at 2700K. Candle
+// 1800K is below even the advertised white range — that look is RGB.
 const KelvinMin = 2700
 
-// ClampKelvin snaps a requested colour-temp up to the LAN floor.
-// 0 is left unset (not a temperature look).
-func ClampKelvin(k int) int {
-	if k > 0 && k < KelvinMin {
-		return KelvinMin
-	}
-	return k
+// BelowWhiteFloor is true when kelvin cannot be a white-LED colour-temp
+// on this lamp and must be played as RGB (KelvinToRGB).
+func BelowWhiteFloor(k int) bool {
+	return k > 0 && k < KelvinMin
 }

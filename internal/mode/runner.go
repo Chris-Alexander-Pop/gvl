@@ -89,9 +89,8 @@ func applyLookFrom(c *govee.Client, prev *Look, look Look, confirm bool) error {
 	return c.PushBrightness(look.Brightness)
 }
 
-// kelvinRamp is true when both ends are colour-temp looks. Those must stay in
-// kelvin mode — sending KelvinToRGB via Color() puts the H60A1 in RGB and the
-// 4000K approximation reads as a cool/cyan wash.
+// kelvinRamp is true when both ends are colour-temp looks. White CCT stays
+// on the WW/CW LEDs; anything warmer than KelvinMin is RGB (candle).
 func kelvinRamp(from, to Look) bool {
 	return from.Temp > 0 && to.Temp > 0
 }
@@ -134,8 +133,17 @@ func lerpBrightness(from, to int, t float64) int {
 	return govee.ClampBrightness(b)
 }
 
+func lookForKelvin(k, brightness int) Look {
+	if govee.BelowWhiteFloor(k) {
+		rgb := govee.KelvinToRGB(k)
+		return Look{Color: &rgb, Brightness: brightness}
+	}
+	return Look{Temp: k, Brightness: brightness}
+}
+
 // lerpLook interpolates from→to at t in [0,1] (already eased). Kelvin ramps
-// stay kelvin; brightness is lerped in perceptual space.
+// stay on white LEDs until the LAN floor, then switch to RGB for the
+// warmer-than-white tail (candle). Brightness is lerped in perceptual space.
 func lerpLook(from, to Look, t float64) Look {
 	if t < 0 {
 		t = 0
@@ -145,8 +153,8 @@ func lerpLook(from, to Look, t float64) Look {
 	}
 	b := lerpBrightness(from.Brightness, to.Brightness, t)
 	if kelvinRamp(from, to) {
-		k := govee.ClampKelvin(roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), t)))
-		return Look{Temp: k, Brightness: b}
+		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), t))
+		return lookForKelvin(k, b)
 	}
 	rgb := govee.LerpRGB(RGBForLook(from), RGBForLook(to), t)
 	return Look{Color: &rgb, Brightness: b}
@@ -287,8 +295,8 @@ func (r *Runner) StartRamp(name string, from, to Look, duration time.Duration, e
 // StartPreview plays from→to as fast as the bulb confirms each look.
 func (r *Runner) StartPreview(name string, from, to Look, endOff bool) int {
 	frames := PreviewLooks(from, to)
-	if kelvinRamp(from, to) && (from.Temp < govee.KelvinMin || to.Temp < govee.KelvinMin) {
-		log.Printf("gvl: preview %s kelvin clamped to LAN floor %dK (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
+	if kelvinRamp(from, to) && (govee.BelowWhiteFloor(from.Temp) || govee.BelowWhiteFloor(to.Temp)) {
+		log.Printf("gvl: preview %s kelvin below %dK played as RGB (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
 	}
 	ctx := r.start(name)
 	go func() {
@@ -342,8 +350,8 @@ func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, durati
 		duration = time.Minute
 	}
 	log.Printf("gvl: ramp %s start duration=%s kelvin=%v end_off=%v", name, duration.Round(time.Second), kelvinRamp(from, to), endOff)
-	if kelvinRamp(from, to) && (from.Temp < govee.KelvinMin || to.Temp < govee.KelvinMin) {
-		log.Printf("gvl: ramp %s kelvin clamped to LAN floor %dK (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
+	if kelvinRamp(from, to) && (govee.BelowWhiteFloor(from.Temp) || govee.BelowWhiteFloor(to.Temp)) {
+		log.Printf("gvl: ramp %s kelvin below %dK played as RGB (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
 	}
 	if err := ApplyLook(r.client, from); err != nil {
 		return fmt.Errorf("start look: %w", err)

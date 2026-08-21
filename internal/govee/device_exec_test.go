@@ -30,15 +30,19 @@ func TestTempMatches(t *testing.T) {
 	}
 }
 
-func TestClampKelvinLanFloor(t *testing.T) {
-	if ClampKelvin(0) != 0 {
-		t.Fatal("unset temp must stay 0")
+func TestBelowWhiteFloor(t *testing.T) {
+	if BelowWhiteFloor(0) || BelowWhiteFloor(2700) || BelowWhiteFloor(4000) {
+		t.Fatal("0 and ≥2700K are white-LED temps")
 	}
-	if ClampKelvin(1800) != KelvinMin || ClampKelvin(2699) != KelvinMin {
-		t.Fatal("below floor should snap to 2700")
+	if !BelowWhiteFloor(1800) || !BelowWhiteFloor(2200) || !BelowWhiteFloor(2699) {
+		t.Fatal("candle/2200 must be RGB on this lamp")
 	}
-	if ClampKelvin(2700) != 2700 || ClampKelvin(4000) != 4000 {
-		t.Fatal("at/above floor should pass through")
+}
+
+func TestKelvinToRGBCandleIsOrange(t *testing.T) {
+	c := KelvinToRGB(1800)
+	if c.R != 255 || c.G < 100 || c.G > 140 || c.B != 0 {
+		t.Fatalf("candle RGB should be orange, got %+v", c)
 	}
 }
 
