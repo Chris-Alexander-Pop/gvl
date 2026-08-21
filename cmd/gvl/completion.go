@@ -19,7 +19,7 @@ func init() {
 	setCmd.ValidArgsFunction = completeSetArgs
 	modeCmd.ValidArgsFunction = completeModeNames
 
-	for _, c := range []*cobra.Command{schedShowCmd, schedEnableCmd, schedDisableCmd, schedDeleteCmd, schedRunCmd} {
+	for _, c := range []*cobra.Command{schedShowCmd, schedEnableCmd, schedDisableCmd, schedDeleteCmd, schedRunCmd, schedPreviewCmd} {
 		c.ValidArgsFunction = completeScheduleIDs
 	}
 

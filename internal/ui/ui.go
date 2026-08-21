@@ -174,6 +174,7 @@ func FormatHome() string {
 	b.WriteString(line("", "gvl schedule set-sleep 23:00", "--end-off") + "\n")
 	b.WriteString(line("", "gvl schedule list", "") + "\n")
 	b.WriteString(line("", "gvl schedule run-now ID", "fire immediately") + "\n")
+	b.WriteString(line("", "gvl schedule preview ID", "as-fast-as-confirmed test ramp") + "\n")
 
 	b.WriteString(section("flags"))
 	fmt.Fprintf(&b, "  %s device IP   %s quiet   %s json   %s daemon url\n",

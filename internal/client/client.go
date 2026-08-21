@@ -173,6 +173,15 @@ func (c *Client) RunSchedule(id string) error {
 	return c.do(http.MethodPost, "/v1/schedules/"+id+"/run", nil, nil)
 }
 
+// PreviewSchedule plays the ramp as fast as the bulb confirms each look.
+func (c *Client) PreviewSchedule(id string) (int, error) {
+	var resp struct {
+		Frames int `json:"frames"`
+	}
+	err := c.do(http.MethodPost, "/v1/schedules/"+id+"/preview", nil, &resp)
+	return resp.Frames, err
+}
+
 func (c *Client) SkipNext(id string, count int, date string) (schedule.Entry, error) {
 	if count < 1 {
 		count = 1

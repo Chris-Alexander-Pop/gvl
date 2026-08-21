@@ -32,6 +32,27 @@ func TestKelvinRampSleepLooks(t *testing.T) {
 	}
 }
 
+func TestPreviewLooksSleepIsDistinctAndEndsAtCandle(t *testing.T) {
+	from := Look{Temp: 4000, Brightness: 100}
+	to := Look{Temp: 1800, Brightness: 1}
+	frames := PreviewLooks(from, to)
+	if len(frames) < 20 {
+		t.Fatalf("too few frames: %d", len(frames))
+	}
+	if frames[0].Temp != 4000 || frames[0].Brightness != 100 {
+		t.Fatalf("start %+v", frames[0])
+	}
+	last := frames[len(frames)-1]
+	if last.Temp != 1800 || last.Brightness != 1 {
+		t.Fatalf("end %+v", last)
+	}
+	for i := 1; i < len(frames); i++ {
+		if looksEqual(frames[i-1], frames[i]) {
+			t.Fatalf("duplicate frame %d", i)
+		}
+	}
+}
+
 func TestLerpBrightnessPerceptual(t *testing.T) {
 	if lerpBrightness(100, 1, 0) != 100 || lerpBrightness(100, 1, 1) != 1 {
 		t.Fatal("endpoints")

@@ -25,6 +25,7 @@ var scheduleCmd = &cobra.Command{
   gvl schedule disable ID
   gvl schedule delete ID
   gvl schedule run-now ID
+  gvl schedule preview ID
   gvl schedule skip ID [--count N]
   gvl schedule next ID --at 09:30 [--count N]
   gvl schedule next ID --clear
@@ -36,7 +37,7 @@ func init() {
 	addQuickFlags(schedSetSleepCmd, false)
 	scheduleCmd.AddCommand(
 		schedWizardCmd, schedListCmd, schedShowCmd,
-		schedEnableCmd, schedDisableCmd, schedDeleteCmd, schedRunCmd,
+		schedEnableCmd, schedDisableCmd, schedDeleteCmd, schedRunCmd, schedPreviewCmd,
 		schedSetWakeCmd, schedSetSleepCmd,
 		schedSkipCmd, schedNextCmd, schedUpcomingCmd,
 	)
@@ -195,6 +196,29 @@ var schedRunCmd = &cobra.Command{
 		}
 		if !flagQuiet {
 			fmt.Printf("running %s\n", args[0])
+		}
+		return nil
+	},
+}
+
+var schedPreviewCmd = &cobra.Command{
+	Use:     "preview ID",
+	Aliases: []string{"test"},
+	Short:   "Play the ramp as fast as the bulb confirms each look",
+	Long: `Ignores duration. Walks the same from→to curve as the timed ramp, but
+advances to the next distinct look the moment device status matches.
+Does not mark the schedule as fired.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireAPI(); err != nil {
+			return err
+		}
+		n, err := api().PreviewSchedule(args[0])
+		if err != nil {
+			return err
+		}
+		if !flagQuiet {
+			fmt.Printf("previewing %s (%d looks)\n", args[0], n)
 		}
 		return nil
 	},

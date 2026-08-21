@@ -326,6 +326,28 @@ func (e *Engine) Fire(entry Entry) error {
 	return nil
 }
 
+// Preview plays a wake/sleep ramp as fast as the bulb confirms each look.
+// Does not mark last_fired.
+func (e *Engine) Preview(entry Entry) (int, error) {
+	if e.BeforeFire != nil {
+		if err := e.BeforeFire(); err != nil {
+			return 0, err
+		}
+	}
+	switch entry.Kind {
+	case KindWake:
+		n := e.runner.StartPreview("preview:"+entry.ID, entry.From, entry.To, false)
+		log.Printf("gvld: preview %s %q frames=%d", entry.Kind, entry.ID, n)
+		return n, nil
+	case KindSleep:
+		n := e.runner.StartPreview("preview:"+entry.ID, entry.From, entry.To, entry.EndOff)
+		log.Printf("gvld: preview %s %q frames=%d end_off=%v", entry.Kind, entry.ID, n, entry.EndOff)
+		return n, nil
+	default:
+		return 0, fmt.Errorf("preview is for wake/sleep ramps, not %s", entry.Kind)
+	}
+}
+
 // Run loops until stop is closed.
 func (e *Engine) Run(stop <-chan struct{}) {
 	ticker := time.NewTicker(30 * time.Second)

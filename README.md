@@ -61,6 +61,7 @@ gvl schedule set-sleep 23:00 --duration 20 --end-off
 gvl schedule list
 gvl schedule upcoming
 gvl schedule run-now wake-0700
+gvl schedule preview sleep-100-days-chal
 
 # one-shot: recurring 07:00 / 23:00 stay put
 gvl schedule skip weekday-wake                 # sleep in; skip tomorrow morning
@@ -144,6 +145,7 @@ gvl schedule wizard
 | GET/PUT | `/v1/schedules` | list / create (`upcoming` is computed) |
 | GET/PUT/DELETE | `/v1/schedules/{id}` | |
 | POST | `/v1/schedules/{id}/run` | fire now |
+| POST | `/v1/schedules/{id}/preview` | play ramp as fast as the bulb confirms |
 | POST | `/v1/schedules/{id}/skip` | `{count, date}` skip next occurrence(s) |
 | GET/POST/DELETE | `/v1/schedules/{id}/next` | one-shot override (time / look / skip) |
 
