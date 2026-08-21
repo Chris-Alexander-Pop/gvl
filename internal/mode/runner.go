@@ -2,6 +2,8 @@ package mode
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"sync"
@@ -17,21 +19,105 @@ type Look struct {
 	Brightness int        `json:"brightness"`
 }
 
-// ApplyLook turns on and applies a look to the device.
+// ApplyLook turns on and applies a look, retrying until the bulb confirms.
 func ApplyLook(c *govee.Client, look Look) error {
-	if err := c.Turn(true); err != nil {
+	if _, err := c.ExecTurn(true); err != nil {
 		return err
 	}
-	if err := c.Brightness(look.Brightness); err != nil {
-		return err
-	}
+	return applyLookAppearance(c, look)
+}
+
+func applyLookAppearance(c *govee.Client, look Look) error {
 	if look.Temp > 0 {
-		return c.Temp(look.Temp)
+		if _, err := c.ExecTemp(look.Temp); err != nil {
+			return err
+		}
+	} else if look.Color != nil {
+		if _, err := c.ExecColor(*look.Color); err != nil {
+			return err
+		}
 	}
-	if look.Color != nil {
-		return c.Color(*look.Color)
+	_, err := c.ExecBrightness(look.Brightness)
+	return err
+}
+
+// pushLookAppearance is the mid-ramp path: two-packet bursts, no status wait.
+// Confirming every frame (200ms+ each) made 1.5s steps; the bulb can't do a
+// smooth curve if we block on UDP status 2× per tick.
+func pushLookAppearance(c *govee.Client, look Look) error {
+	if look.Temp > 0 {
+		if err := c.PushTemp(look.Temp); err != nil {
+			return err
+		}
+	} else if look.Color != nil {
+		if err := c.PushColor(*look.Color); err != nil {
+			return err
+		}
 	}
-	return nil
+	return c.PushBrightness(look.Brightness)
+}
+
+// kelvinRamp is true when both ends are colour-temp looks. Those must stay in
+// kelvin mode — sending KelvinToRGB via Color() puts the H60A1 in RGB and the
+// 4000K approximation reads as a cool/cyan wash.
+func kelvinRamp(from, to Look) bool {
+	return from.Temp > 0 && to.Temp > 0
+}
+
+func roundKelvin(k float64) int {
+	if k < 1 {
+		return 0
+	}
+	return int(math.Round(k/100) * 100)
+}
+
+// smoothstep is Hermite ease-in-out: 3t² − 2t³. Slow at both ends, faster in
+// the middle. Applied to wall-clock t before interpolating look.
+func smoothstep(t float64) float64 {
+	return t * t * (3 - 2*t)
+}
+
+// brightnessGamma maps Govee 0–100 (roughly linear PWM / flux) to a curve
+// closer to perceived brightness. Linear % lerp keeps a 100→1 sleep ramp
+// looking "still on" until the last minutes; this drops PWM faster up front.
+const brightnessGamma = 2.2
+
+func perceptualY(brightness int) float64 {
+	x := float64(govee.ClampBrightness(brightness)) / 100
+	if x <= 0 {
+		return 0
+	}
+	return math.Pow(x, 1/brightnessGamma)
+}
+
+func lerpBrightness(from, to int, t float64) int {
+	if t <= 0 {
+		return govee.ClampBrightness(from)
+	}
+	if t >= 1 {
+		return govee.ClampBrightness(to)
+	}
+	y := govee.Lerp(perceptualY(from), perceptualY(to), t)
+	b := int(math.Round(100 * math.Pow(y, brightnessGamma)))
+	return govee.ClampBrightness(b)
+}
+
+// lerpLook interpolates from→to at t in [0,1] (already eased). Kelvin ramps
+// stay kelvin; brightness is lerped in perceptual space.
+func lerpLook(from, to Look, t float64) Look {
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	b := lerpBrightness(from.Brightness, to.Brightness, t)
+	if kelvinRamp(from, to) {
+		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), t))
+		return Look{Temp: k, Brightness: b}
+	}
+	rgb := govee.LerpRGB(RGBForLook(from), RGBForLook(to), t)
+	return Look{Color: &rgb, Brightness: b}
 }
 
 // RGBForLook returns the RGB used for blending (temp approximated when set).
@@ -126,55 +212,76 @@ func (r *Runner) StartRamp(name string, from, to Look, duration time.Duration, e
 	ctx := r.start(name)
 	go func() {
 		defer r.clearIf(name)
-		_ = r.runRamp(ctx, from, to, duration, endOff)
+		if err := r.runRamp(ctx, name, from, to, duration, endOff); err != nil && ctx.Err() == nil {
+			log.Printf("gvl: ramp %s: %v", name, err)
+		}
 	}()
 }
 
-func (r *Runner) runRamp(ctx context.Context, from, to Look, duration time.Duration, endOff bool) error {
+func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, duration time.Duration, endOff bool) error {
 	if duration <= 0 {
 		duration = time.Minute
 	}
-	_ = r.client.Turn(true)
-	startRGB := RGBForLook(from)
-	endRGB := RGBForLook(to)
-	startB := from.Brightness
-	endB := to.Brightness
-	_ = r.client.Color(startRGB)
-	_ = r.client.Brightness(startB)
+	log.Printf("gvl: ramp %s start duration=%s kelvin=%v end_off=%v", name, duration.Round(time.Second), kelvinRamp(from, to), endOff)
+	if err := ApplyLook(r.client, from); err != nil {
+		return fmt.Errorf("start look: %w", err)
+	}
 
-	const frame = 1500 * time.Millisecond
+	const frame = 400 * time.Millisecond
+	const confirmEvery = 10 * time.Second
 	start := time.Now()
+	lastConfirm := start
 	ticker := time.NewTicker(frame)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("gvl: ramp %s cancelled", name)
 			return ctx.Err()
 		case now := <-ticker.C:
 			t := now.Sub(start).Seconds() / duration.Seconds()
 			if t >= 1 {
-				_ = r.client.Color(endRGB)
-				if to.Temp > 0 {
-					_ = r.client.Temp(to.Temp)
-				}
-				_ = r.client.Brightness(endB)
-				if endOff {
-					_ = r.client.Turn(false)
-				}
-				return nil
+				return r.finishRamp(name, to, endOff)
 			}
-			// ease-in-out
-			te := t * t * (3 - 2*t)
-			_ = r.client.Color(govee.LerpRGB(startRGB, endRGB, te))
-			b := int(math.Round(govee.Lerp(float64(startB), float64(endB), te)))
-			_ = r.client.Brightness(b)
+			look := lerpLook(from, to, smoothstep(t))
+			var err error
+			if now.Sub(lastConfirm) >= confirmEvery {
+				err = applyLookAppearance(r.client, look)
+				lastConfirm = now
+			} else {
+				err = pushLookAppearance(r.client, look)
+			}
+			if err != nil {
+				log.Printf("gvl: ramp %s frame: %v", name, err)
+			}
 		}
 	}
 }
 
+func (r *Runner) finishRamp(name string, to Look, endOff bool) error {
+	if endOff {
+		if _, err := r.client.ExecTurn(false); err != nil {
+			log.Printf("gvl: ramp %s end-off failed: %v", name, err)
+			return err
+		}
+		log.Printf("gvl: ramp %s ended (off)", name)
+		return nil
+	}
+	if err := applyLookAppearance(r.client, to); err != nil {
+		log.Printf("gvl: ramp %s end look failed: %v", name, err)
+		return err
+	}
+	log.Printf("gvl: ramp %s ended (look)", name)
+	return nil
+}
+
 func (r *Runner) prepare(cfg Config) {
-	_ = r.client.Turn(true)
-	_ = r.client.Brightness(cfg.Brightness)
+	if _, err := r.client.ExecTurn(true); err != nil {
+		log.Printf("gvl: mode %s prepare on: %v", cfg.Name, err)
+	}
+	if _, err := r.client.ExecBrightness(cfg.Brightness); err != nil {
+		log.Printf("gvl: mode %s prepare brightness: %v", cfg.Name, err)
+	}
 }
 
 func (r *Runner) sleep(ctx context.Context, d time.Duration) bool {
@@ -378,11 +485,9 @@ func (r *Runner) pulse(ctx context.Context, cfg Config) {
 func (r *Runner) tempFade(ctx context.Context, cfg Config, a, b int) {
 	start := time.Now()
 	period := 7.0 / cfg.Speed
-	rgbA := govee.KelvinToRGB(a)
-	rgbB := govee.KelvinToRGB(b)
 	for {
 		t := govee.SmoothPulse(math.Mod(time.Since(start).Seconds()/period, 1))
-		_ = r.client.Color(govee.LerpRGB(rgbA, rgbB, t))
+		_ = r.client.Temp(int(math.Round(govee.Lerp(float64(a), float64(b), t))))
 		if !r.sleep(ctx, cfg.Interval) {
 			return
 		}
@@ -439,7 +544,7 @@ func (r *Runner) candle(ctx context.Context, cfg Config) {
 		}
 		currentTemp = govee.Lerp(currentTemp, targetTemp, 0.14)
 		currentLevel = govee.Lerp(currentLevel, targetLevel, 0.12)
-		_ = r.client.Color(govee.KelvinToRGB(int(math.Round(currentTemp))))
+		_ = r.client.Temp(int(math.Round(currentTemp)))
 		_ = r.client.Brightness(int(math.Round(currentLevel)))
 		if !r.sleep(ctx, cfg.Interval) {
 			return

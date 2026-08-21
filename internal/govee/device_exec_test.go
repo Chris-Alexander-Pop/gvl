@@ -14,3 +14,25 @@ func TestColorMatches(t *testing.T) {
 		t.Fatal("different RGB should not match")
 	}
 }
+
+func TestTempMatches(t *testing.T) {
+	if tempMatches(&Status{ColorTemInKelvin: 0}, 4000) {
+		t.Fatal("RGB mode must not match a kelvin target")
+	}
+	if !tempMatches(&Status{ColorTemInKelvin: 4000}, 4000) {
+		t.Fatal("exact kelvin should match")
+	}
+	if !tempMatches(&Status{ColorTemInKelvin: 3900}, 4000) {
+		t.Fatal("100K snap should still match")
+	}
+	if tempMatches(&Status{ColorTemInKelvin: 2700}, 4000) {
+		t.Fatal("far kelvin should not match")
+	}
+}
+
+func TestKelvinToRGBNeutralIsWarmDominant(t *testing.T) {
+	c := KelvinToRGB(4000)
+	if c.B > c.R {
+		t.Fatalf("4000K RGB approx should not be blue-dominant (that looks cyan on RGB mode): %+v", c)
+	}
+}

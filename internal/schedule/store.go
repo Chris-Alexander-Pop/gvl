@@ -3,6 +3,7 @@ package schedule
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -294,6 +295,7 @@ func (e *Engine) Fire(entry Entry) error {
 			return err
 		}
 	}
+	log.Printf("gvld: firing %s %q duration=%dm end_off=%v", entry.Kind, entry.ID, entry.DurationMin, entry.EndOff)
 	switch entry.Kind {
 	case KindWake:
 		dur := time.Duration(entry.DurationMin) * time.Minute
