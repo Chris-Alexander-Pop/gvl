@@ -141,23 +141,108 @@ func lookForKelvin(k, brightness int) Look {
 	return Look{Temp: k, Brightness: brightness}
 }
 
-// lerpLook interpolates from→to at t in [0,1] (already eased). Kelvin ramps
-// stay on white LEDs until the LAN floor, then switch to RGB for the
-// warmer-than-white tail (candle). Brightness is lerped in perceptual space.
-func lerpLook(from, to Look, t float64) Look {
+// twoPhase is a ramp that must hand off between white LEDs and RGB
+// (sleep: kelvin→candle colour; wake: colour→kelvin).
+func twoPhase(from, to Look) bool {
+	if kelvinRamp(from, to) && from.Temp >= govee.KelvinMin && govee.BelowWhiteFloor(to.Temp) {
+		return true
+	}
+	if from.Color != nil && from.Temp == 0 && to.Temp >= govee.KelvinMin {
+		return true
+	}
+	return false
+}
+
+// phaseSplit is the wall-clock fraction spent on the start look.
+// splitPct 1–99 is explicit; 0 means auto (kelvin-span, or 50% for colour→white).
+func phaseSplit(from, to Look, splitPct int) float64 {
+	if !twoPhase(from, to) {
+		return 0
+	}
+	if splitPct > 0 && splitPct < 100 {
+		return float64(splitPct) / 100
+	}
+	if kelvinRamp(from, to) {
+		den := float64(from.Temp - to.Temp)
+		if den <= 0 {
+			return 0.5
+		}
+		s := float64(from.Temp-govee.KelvinMin) / den
+		if s < 0.05 {
+			return 0.05
+		}
+		if s > 0.95 {
+			return 0.95
+		}
+		return s
+	}
+	return 0.5
+}
+
+func clamp01t(t float64) float64 {
 	if t < 0 {
-		t = 0
+		return 0
 	}
 	if t > 1 {
-		t = 1
+		return 1
 	}
-	b := lerpBrightness(from.Brightness, to.Brightness, t)
+	return t
+}
+
+// lerpLook interpolates from→to at wall-clock t in [0,1]. Brightness eases
+// over the full duration. When the ramp is two-phase, splitPct is the percent
+// of that duration spent on the start look (white for sleep, colour for wake);
+// the rest is the second look. Each phase has its own smoothstep.
+func lerpLook(from, to Look, t float64, splitPct int) Look {
+	t = clamp01t(t)
+	b := lerpBrightness(from.Brightness, to.Brightness, smoothstep(t))
+	s := phaseSplit(from, to, splitPct)
+	if s > 0 && s < 1 {
+		if t <= s {
+			u := 0.0
+			if s > 0 {
+				u = smoothstep(t / s)
+			}
+			return lerpStartPhase(from, to, u, b)
+		}
+		u := 0.0
+		if s < 1 {
+			u = smoothstep((t - s) / (1 - s))
+		}
+		return lerpEndPhase(from, to, u, b)
+	}
+	ts := smoothstep(t)
 	if kelvinRamp(from, to) {
-		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), t))
+		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), ts))
 		return lookForKelvin(k, b)
 	}
-	rgb := govee.LerpRGB(RGBForLook(from), RGBForLook(to), t)
+	rgb := govee.LerpRGB(RGBForLook(from), RGBForLook(to), ts)
 	return Look{Color: &rgb, Brightness: b}
+}
+
+func lerpStartPhase(from, to Look, u float64, b int) Look {
+	if kelvinRamp(from, to) {
+		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(govee.KelvinMin), u))
+		return Look{Temp: k, Brightness: b}
+	}
+	if from.Color != nil {
+		c := *from.Color
+		return Look{Color: &c, Brightness: b}
+	}
+	return lookForKelvin(from.Temp, b)
+}
+
+func lerpEndPhase(from, to Look, u float64, b int) Look {
+	if kelvinRamp(from, to) {
+		k := roundKelvin(govee.Lerp(float64(govee.KelvinMin-100), float64(to.Temp), u))
+		return lookForKelvin(k, b)
+	}
+	k0 := govee.KelvinMin
+	if to.Temp < k0 {
+		k0 = to.Temp
+	}
+	k := roundKelvin(govee.Lerp(float64(k0), float64(to.Temp), u))
+	return lookForKelvin(k, b)
 }
 
 func looksEqual(a, b Look) bool {
@@ -177,17 +262,17 @@ const previewSamples = 400
 
 // PreviewLooks is the timed ramp sampled densely, with duplicate looks removed.
 // Used by Test Ramp: one confirmed Exec per distinct look, no wall-clock wait.
-func PreviewLooks(from, to Look) []Look {
+func PreviewLooks(from, to Look, splitPct int) []Look {
 	out := make([]Look, 0, 64)
 	for i := 0; i <= previewSamples; i++ {
 		t := float64(i) / float64(previewSamples)
-		look := lerpLook(from, to, smoothstep(t))
+		look := lerpLook(from, to, t, splitPct)
 		if len(out) > 0 && looksEqual(out[len(out)-1], look) {
 			continue
 		}
 		out = append(out, look)
 	}
-	end := lerpLook(from, to, 1)
+	end := lerpLook(from, to, 1, splitPct)
 	if len(out) == 0 || !looksEqual(out[len(out)-1], end) {
 		out = append(out, end)
 	}
@@ -282,21 +367,21 @@ func (r *Runner) StartMode(cfg Config) {
 }
 
 // StartRamp runs a one-shot from→to ramp over duration.
-func (r *Runner) StartRamp(name string, from, to Look, duration time.Duration, endOff bool) {
+func (r *Runner) StartRamp(name string, from, to Look, duration time.Duration, endOff bool, splitPct int) {
 	ctx := r.start(name)
 	go func() {
 		defer r.clearIf(name)
-		if err := r.runRamp(ctx, name, from, to, duration, endOff); err != nil && ctx.Err() == nil {
+		if err := r.runRamp(ctx, name, from, to, duration, endOff, splitPct); err != nil && ctx.Err() == nil {
 			log.Printf("gvl: ramp %s: %v", name, err)
 		}
 	}()
 }
 
 // StartPreview plays from→to as fast as the bulb confirms each look.
-func (r *Runner) StartPreview(name string, from, to Look, endOff bool) int {
-	frames := PreviewLooks(from, to)
-	if kelvinRamp(from, to) && (govee.BelowWhiteFloor(from.Temp) || govee.BelowWhiteFloor(to.Temp)) {
-		log.Printf("gvl: preview %s kelvin below %dK played as RGB (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
+func (r *Runner) StartPreview(name string, from, to Look, endOff bool, splitPct int) int {
+	frames := PreviewLooks(from, to, splitPct)
+	if s := phaseSplit(from, to, splitPct); s > 0 {
+		log.Printf("gvl: preview %s split=%.0f/%.0f start/end phase", name, s*100, (1-s)*100)
 	}
 	ctx := r.start(name)
 	go func() {
@@ -345,14 +430,13 @@ func (r *Runner) runPreview(ctx context.Context, name string, frames []Look, end
 	return runErr
 }
 
-func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, duration time.Duration, endOff bool) error {
+func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, duration time.Duration, endOff bool, splitPct int) error {
 	if duration <= 0 {
 		duration = time.Minute
 	}
-	log.Printf("gvl: ramp %s start duration=%s kelvin=%v end_off=%v", name, duration.Round(time.Second), kelvinRamp(from, to), endOff)
-	if kelvinRamp(from, to) && (govee.BelowWhiteFloor(from.Temp) || govee.BelowWhiteFloor(to.Temp)) {
-		log.Printf("gvl: ramp %s kelvin below %dK played as RGB (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
-	}
+	s := phaseSplit(from, to, splitPct)
+	log.Printf("gvl: ramp %s start duration=%s kelvin=%v two_phase=%v split=%.0f/%.0f end_off=%v",
+		name, duration.Round(time.Second), kelvinRamp(from, to), s > 0, s*100, (1-s)*100, endOff)
 	if err := ApplyLook(r.client, from); err != nil {
 		return fmt.Errorf("start look: %w", err)
 	}
@@ -374,7 +458,7 @@ func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, durati
 			if t >= 1 {
 				return r.finishRamp(name, to, endOff)
 			}
-			look := lerpLook(from, to, smoothstep(t))
+			look := lerpLook(from, to, t, splitPct)
 			var err error
 			if now.Sub(lastConfirm) >= confirmEvery {
 				err = applyLookFrom(r.client, &prev, look, true)

@@ -12,16 +12,16 @@ func TestKelvinRampSleepLooks(t *testing.T) {
 	if !kelvinRamp(from, to) {
 		t.Fatal("sleep 4000K→1800K is a kelvin-tagged ramp")
 	}
-	start := lerpLook(from, to, 0)
+	start := lerpLook(from, to, 0, 0)
 	if start.Temp != 4000 || start.Color != nil || start.Brightness != 100 {
 		t.Fatalf("t=0: %+v", start)
 	}
-	end := lerpLook(from, to, 1)
+	end := lerpLook(from, to, 1, 0)
 	candle := govee.KelvinToRGB(1800)
 	if end.Temp != 0 || end.Color == nil || *end.Color != candle || end.Brightness != 1 {
 		t.Fatalf("t=1 should be RGB candle %+v, got %+v", candle, end)
 	}
-	mid := lerpLook(from, to, 0.5)
+	mid := lerpLook(from, to, 0.5, 0)
 	if mid.Color != nil {
 		t.Fatal("mid frame must still be white-LED kelvin")
 	}
@@ -36,7 +36,7 @@ func TestKelvinRampSleepLooks(t *testing.T) {
 func TestPreviewLooksSleepEndsOnRGBCandle(t *testing.T) {
 	from := Look{Temp: 4000, Brightness: 100}
 	to := Look{Temp: 1800, Brightness: 1}
-	frames := PreviewLooks(from, to)
+	frames := PreviewLooks(from, to, 0)
 	if len(frames) < 20 {
 		t.Fatalf("too few frames: %d", len(frames))
 	}
@@ -76,7 +76,7 @@ func TestPreviewLooksSleepEndsOnRGBCandle(t *testing.T) {
 func TestPreviewLooksConstantBrightnessSwitchesToRGB(t *testing.T) {
 	from := Look{Temp: 4000, Brightness: 1}
 	to := Look{Temp: 1800, Brightness: 1}
-	frames := PreviewLooks(from, to)
+	frames := PreviewLooks(from, to, 0)
 	if len(frames) < 15 {
 		t.Fatalf("too few frames: %d", len(frames))
 	}
@@ -122,8 +122,32 @@ func TestLerpLookWakeStaysRGBUntilEnd(t *testing.T) {
 	if kelvinRamp(from, to) {
 		t.Fatal("cyan→daylight is a mixed ramp")
 	}
-	start := lerpLook(from, to, 0)
+	start := lerpLook(from, to, 0, 0)
 	if start.Color == nil || *start.Color != cyan || start.Temp != 0 {
 		t.Fatalf("t=0 should be cyan RGB, got %+v", start)
+	}
+	end := lerpLook(from, to, 1, 0)
+	if end.Color != nil || end.Temp != 5000 {
+		t.Fatalf("t=1 should be daylight kelvin, got %+v", end)
+	}
+}
+
+func TestSplit20HandsOffEarlyToRGB(t *testing.T) {
+	from := Look{Temp: 4000, Brightness: 100}
+	to := Look{Temp: 1800, Brightness: 1}
+	if s := phaseSplit(from, to, 20); s != 0.2 {
+		t.Fatalf("split %v", s)
+	}
+	early := lerpLook(from, to, 0.19, 20)
+	if early.Color != nil || early.Temp < govee.KelvinMin {
+		t.Fatalf("t=0.19 should still be white, got %+v", early)
+	}
+	mid := lerpLook(from, to, 0.25, 20)
+	if mid.Color == nil || mid.Temp != 0 {
+		t.Fatalf("t=0.25 with 20%% split should already be RGB, got %+v", mid)
+	}
+	half := lerpLook(from, to, 0.5, 20)
+	if half.Color == nil {
+		t.Fatal("t=0.5 with 20% split must be colour phase")
 	}
 }

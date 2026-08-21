@@ -36,9 +36,12 @@ type Entry struct {
 	From        mode.Look `json:"from"`
 	To          mode.Look `json:"to"`
 	EndOff      bool      `json:"end_off,omitempty"` // sleep: turn off at end
-	Mode        string    `json:"mode,omitempty"`
-	LastFired   string    `json:"last_fired,omitempty"` // YYYY-MM-DD
-	Next        []Patch   `json:"next,omitempty"`
+	// SplitPct is 1–99: percent of duration spent on the start look
+	// (sleep: white CCT; wake: RGB). The rest is the other mode. 0 = auto.
+	SplitPct  int     `json:"split_pct,omitempty"`
+	Mode      string  `json:"mode,omitempty"`
+	LastFired string  `json:"last_fired,omitempty"` // YYYY-MM-DD
+	Next      []Patch `json:"next,omitempty"`
 
 	// Computed on read (not persisted).
 	Upcoming     string `json:"upcoming,omitempty"`
@@ -121,6 +124,9 @@ func (s *Store) Get(id string) (Entry, bool) {
 
 // Upsert inserts or replaces an entry.
 func (s *Store) Upsert(e Entry) error {
+	if e.SplitPct != 0 && (e.SplitPct < 1 || e.SplitPct > 99) {
+		return fmt.Errorf("split_pct must be 1–99 (or 0 for auto)")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.list {
@@ -302,13 +308,13 @@ func (e *Engine) Fire(entry Entry) error {
 		if dur <= 0 {
 			dur = 30 * time.Minute
 		}
-		e.runner.StartRamp("wake:"+entry.ID, entry.From, entry.To, dur, false)
+		e.runner.StartRamp("wake:"+entry.ID, entry.From, entry.To, dur, false, entry.SplitPct)
 	case KindSleep:
 		dur := time.Duration(entry.DurationMin) * time.Minute
 		if dur <= 0 {
 			dur = 30 * time.Minute
 		}
-		e.runner.StartRamp("sleep:"+entry.ID, entry.From, entry.To, dur, entry.EndOff)
+		e.runner.StartRamp("sleep:"+entry.ID, entry.From, entry.To, dur, entry.EndOff, entry.SplitPct)
 	case KindMode:
 		cfg := mode.Config{
 			Name:          entry.Mode,
@@ -336,11 +342,11 @@ func (e *Engine) Preview(entry Entry) (int, error) {
 	}
 	switch entry.Kind {
 	case KindWake:
-		n := e.runner.StartPreview("preview:"+entry.ID, entry.From, entry.To, false)
+		n := e.runner.StartPreview("preview:"+entry.ID, entry.From, entry.To, false, entry.SplitPct)
 		log.Printf("gvld: preview %s %q frames=%d", entry.Kind, entry.ID, n)
 		return n, nil
 	case KindSleep:
-		n := e.runner.StartPreview("preview:"+entry.ID, entry.From, entry.To, entry.EndOff)
+		n := e.runner.StartPreview("preview:"+entry.ID, entry.From, entry.To, entry.EndOff, entry.SplitPct)
 		log.Printf("gvld: preview %s %q frames=%d end_off=%v", entry.Kind, entry.ID, n, entry.EndOff)
 		return n, nil
 	default:
