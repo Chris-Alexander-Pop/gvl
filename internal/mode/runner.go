@@ -141,20 +141,29 @@ func lookForKelvin(k, brightness int) Look {
 	return Look{Temp: k, Brightness: brightness}
 }
 
-// twoPhase is a ramp that must hand off between white LEDs and RGB
-// (sleep: kelvin→candle colour; wake: colour→kelvin).
+// twoPhase is a ramp that hands off between white LEDs and RGB.
 func twoPhase(from, to Look) bool {
-	if kelvinRamp(from, to) && from.Temp >= govee.KelvinMin && govee.BelowWhiteFloor(to.Temp) {
+	return colourSecond(from, to) || colourFirst(from, to)
+}
+
+// colourSecond is sleep-style: white CCT first, then RGB (candle kelvin or a colour).
+func colourSecond(from, to Look) bool {
+	if from.Temp < govee.KelvinMin {
+		return false
+	}
+	if govee.BelowWhiteFloor(to.Temp) {
 		return true
 	}
-	if from.Color != nil && from.Temp == 0 && to.Temp >= govee.KelvinMin {
-		return true
-	}
-	return false
+	return to.Color != nil && to.Temp == 0
+}
+
+// colourFirst is wake-style: RGB first, then white CCT.
+func colourFirst(from, to Look) bool {
+	return from.Color != nil && from.Temp == 0 && to.Temp >= govee.KelvinMin
 }
 
 // phaseSplit is the wall-clock fraction spent on the start look.
-// splitPct 1–99 is explicit; 0 means auto (kelvin-span, or 50% for colour→white).
+// splitPct 1–99 is explicit; 0 means auto (kelvin-span, or 50% for mixed).
 func phaseSplit(from, to Look, splitPct int) float64 {
 	if !twoPhase(from, to) {
 		return 0
@@ -189,13 +198,12 @@ func clamp01t(t float64) float64 {
 	return t
 }
 
-// lerpLook interpolates from→to at wall-clock t in [0,1]. Brightness eases
-// over the full duration. When the ramp is two-phase, splitPct is the percent
-// of that duration spent on the start look (white for sleep, colour for wake);
-// the rest is the second look. Each phase has its own smoothstep.
+// lerpLook interpolates from→to at wall-clock t in [0,1].
+// Sleep (colour second): white holds from-brightness; RGB runs 100% → to-brightness
+// (100% colour is still dimmer than low kelvin on the H60A1). Wake keeps a
+// full-duration brightness lerp. splitPct is the start-look time share.
 func lerpLook(from, to Look, t float64, splitPct int) Look {
 	t = clamp01t(t)
-	b := lerpBrightness(from.Brightness, to.Brightness, smoothstep(t))
 	s := phaseSplit(from, to, splitPct)
 	if s > 0 && s < 1 {
 		if t <= s {
@@ -203,14 +211,23 @@ func lerpLook(from, to Look, t float64, splitPct int) Look {
 			if s > 0 {
 				u = smoothstep(t / s)
 			}
+			b := from.Brightness
+			if !colourSecond(from, to) {
+				b = lerpBrightness(from.Brightness, to.Brightness, smoothstep(t))
+			}
 			return lerpStartPhase(from, to, u, b)
 		}
 		u := 0.0
 		if s < 1 {
 			u = smoothstep((t - s) / (1 - s))
 		}
+		b := lerpBrightness(from.Brightness, to.Brightness, smoothstep(t))
+		if colourSecond(from, to) {
+			b = lerpBrightness(100, to.Brightness, u)
+		}
 		return lerpEndPhase(from, to, u, b)
 	}
+	b := lerpBrightness(from.Brightness, to.Brightness, smoothstep(t))
 	ts := smoothstep(t)
 	if kelvinRamp(from, to) {
 		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), ts))
@@ -221,7 +238,7 @@ func lerpLook(from, to Look, t float64, splitPct int) Look {
 }
 
 func lerpStartPhase(from, to Look, u float64, b int) Look {
-	if kelvinRamp(from, to) {
+	if from.Temp >= govee.KelvinMin {
 		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(govee.KelvinMin), u))
 		return Look{Temp: k, Brightness: b}
 	}
@@ -233,6 +250,10 @@ func lerpStartPhase(from, to Look, u float64, b int) Look {
 }
 
 func lerpEndPhase(from, to Look, u float64, b int) Look {
+	if to.Color != nil && to.Temp == 0 {
+		c := *to.Color
+		return Look{Color: &c, Brightness: b}
+	}
 	if kelvinRamp(from, to) {
 		k := roundKelvin(govee.Lerp(float64(govee.KelvinMin-100), float64(to.Temp), u))
 		return lookForKelvin(k, b)

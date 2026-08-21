@@ -84,6 +84,9 @@ warm-white; `colorwc` kelvin does not). Sleep targets below that — including c
 the end look (colour). Wake is the inverse: that percent is the start colour, the rest
 is white. Omit or `0` for automatic (kelvin-span, or 50/50 for colour→white).
 
+On sleep, the white phase **holds** from-brightness. The colour phase always runs
+**100% → to-brightness** — 100% RGB is still dimmer than a low kelvin on the H60A1.
+
 ## Networking options
 
 1. **Same LAN** — `gvld` and the light on one network. Simplest.
