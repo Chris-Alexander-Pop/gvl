@@ -28,8 +28,8 @@ func TestKelvinRampSleepLooks(t *testing.T) {
 	if mid.Temp < 2800 || mid.Temp > 3000 {
 		t.Fatalf("mid kelvin got %d", mid.Temp)
 	}
-	if mid.Brightness >= 50 {
-		t.Fatalf("perceptual mid brightness should be well under linear 50%%, got %d", mid.Brightness)
+	if mid.Brightness != 100 {
+		t.Fatalf("white phase holds from-brightness, got %d", mid.Brightness)
 	}
 }
 
@@ -86,6 +86,16 @@ func TestPreviewLooksConstantBrightnessSwitchesToRGB(t *testing.T) {
 	last := frames[len(frames)-1]
 	if last.Color == nil || last.Temp != 0 || last.Brightness != 1 {
 		t.Fatalf("end should be RGB candle, got %+v", last)
+	}
+	sawHot := false
+	for _, f := range frames {
+		if f.Color != nil && f.Brightness >= 90 {
+			sawHot = true
+			break
+		}
+	}
+	if !sawHot {
+		t.Fatal("colour phase should start near 100% even when from-brightness is 1")
 	}
 }
 
@@ -146,8 +156,35 @@ func TestSplit20HandsOffEarlyToRGB(t *testing.T) {
 	if mid.Color == nil || mid.Temp != 0 {
 		t.Fatalf("t=0.25 with 20%% split should already be RGB, got %+v", mid)
 	}
+	if mid.Brightness < 90 {
+		t.Fatalf("colour phase should start near 100%%, got %d", mid.Brightness)
+	}
 	half := lerpLook(from, to, 0.5, 20)
 	if half.Color == nil {
 		t.Fatal("t=0.5 with 20% split must be colour phase")
+	}
+}
+
+func TestKelvinToRedColourPhaseIs100To1(t *testing.T) {
+	red := govee.NamedColors["red"]
+	from := Look{Temp: 4000, Brightness: 1}
+	to := Look{Color: &red, Brightness: 1}
+	if !colourSecond(from, to) {
+		t.Fatal("4000K→red must be a two-phase sleep ramp")
+	}
+	if s := phaseSplit(from, to, 20); s != 0.2 {
+		t.Fatalf("split %v", s)
+	}
+	white := lerpLook(from, to, 0.10, 20)
+	if white.Temp < govee.KelvinMin || white.Color != nil || white.Brightness != 1 {
+		t.Fatalf("white phase %+v", white)
+	}
+	hot := lerpLook(from, to, 0.21, 20)
+	if hot.Color == nil || *hot.Color != red || hot.Brightness < 90 {
+		t.Fatalf("handoff should be ~100%% red, got %+v", hot)
+	}
+	end := lerpLook(from, to, 1, 20)
+	if end.Color == nil || *end.Color != red || end.Brightness != 1 {
+		t.Fatalf("end %+v", end)
 	}
 }
