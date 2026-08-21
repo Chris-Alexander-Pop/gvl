@@ -75,9 +75,10 @@ gvl schedule next weekday-wake --clear
 Wake ramps turn the light on and ease from a start look to an end look over N minutes.  
 Sleep ramps dim toward a warm/low look and can power off at the end.
 
-The H60A1 LAN API will not go warmer than **2700K**. A sleep target of candle (1800K) is
-played as 2700K, then `end_off` if set. Sending 1800K repeatedly is ignored and looks like
-a pulse at warm 1%.
+The H60A1 white LEDs bottom out at **2700K** over LAN (the app’s 2200K mixes RGB into
+warm-white; `colorwc` kelvin does not). Sleep targets below that — including candle
+1800K — switch to RGB orange so the evening ramp actually turns into a colour, then
+`end_off` if set.
 
 ## Networking options
 

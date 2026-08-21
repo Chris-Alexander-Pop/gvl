@@ -162,18 +162,19 @@ func (c *Client) ExecColor(rgb RGB) (*Status, error) {
 }
 
 // ExecTemp sets color temperature, retries until status matches, and returns status.
-// Below KelvinMin the LAN API is a no-op; we snap to the floor instead of
-// re-sending colorwc (that pulse is what Test Ramp looked like).
+// Below KelvinMin the white LEDs will not move; play KelvinToRGB instead
+// (candle 1800K → orange) rather than clamping to 2700K or retry-pulsing.
 func (c *Client) ExecTemp(kelvin int) (*Status, error) {
-	want := ClampKelvin(kelvin)
-	if want != kelvin && kelvin > 0 {
-		trace.Printf("temp %dK clamped to %dK (LAN floor)", kelvin, want)
+	if BelowWhiteFloor(kelvin) {
+		rgb := KelvinToRGB(kelvin)
+		trace.Printf("temp %dK below LAN white floor %dK; RGB %d,%d,%d", kelvin, KelvinMin, rgb.R, rgb.G, rgb.B)
+		return c.ExecColor(rgb)
 	}
 	return c.execUntil("temp", false,
-		func() error { return c.PushTemp(want) },
-		func(st *Status) bool { return tempMatches(st, want) },
+		func() error { return c.PushTemp(kelvin) },
+		func(st *Status) bool { return tempMatches(st, kelvin) },
 		func(st *Status) string {
-			return fmt.Sprintf("temp still %s (want %s)", FormatColor(st.Color, st.ColorTemInKelvin), FormatColor(RGB{}, want))
+			return fmt.Sprintf("temp still %s (want %s)", FormatColor(st.Color, st.ColorTemInKelvin), FormatColor(RGB{}, kelvin))
 		},
 	)
 }
@@ -198,9 +199,12 @@ func (c *Client) PushColor(rgb RGB) error {
 
 // PushTemp sends color temperature twice without waiting for status.
 func (c *Client) PushTemp(kelvin int) error {
+	if BelowWhiteFloor(kelvin) {
+		return c.PushColor(KelvinToRGB(kelvin))
+	}
 	return c.sendBurst("colorwc", map[string]any{
 		"color":            map[string]int{"r": 0, "g": 0, "b": 0},
-		"colorTemInKelvin": ClampKelvin(kelvin),
+		"colorTemInKelvin": kelvin,
 	})
 }
 
