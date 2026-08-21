@@ -75,6 +75,10 @@ gvl schedule next weekday-wake --clear
 Wake ramps turn the light on and ease from a start look to an end look over N minutes.  
 Sleep ramps dim toward a warm/low look and can power off at the end.
 
+The H60A1 LAN API will not go warmer than **2700K**. A sleep target of candle (1800K) is
+played as 2700K, then `end_off` if set. Sending 1800K repeatedly is ignored and looks like
+a pulse at warm 1%.
+
 ## Networking options
 
 1. **Same LAN** — `gvld` and the light on one network. Simplest.

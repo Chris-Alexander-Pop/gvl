@@ -28,31 +28,63 @@ func ApplyLook(c *govee.Client, look Look) error {
 }
 
 func applyLookAppearance(c *govee.Client, look Look) error {
-	if look.Temp > 0 {
-		if _, err := c.ExecTemp(look.Temp); err != nil {
+	return applyLookFrom(c, nil, look, true)
+}
+
+func sameAppearance(a, b Look) bool {
+	if a.Temp != b.Temp {
+		return false
+	}
+	if a.Color == nil && b.Color == nil {
+		return true
+	}
+	if a.Color == nil || b.Color == nil {
+		return false
+	}
+	return *a.Color == *b.Color
+}
+
+func copyLook(l Look) Look {
+	out := l
+	if l.Color != nil {
+		c := *l.Color
+		out.Color = &c
+	}
+	return out
+}
+
+// applyLookFrom sends only what changed. Re-sending colorwc for the same kelvin
+// resets H60A1 white mix and looks like a brightness pulse. After any color/temp
+// change, brightness is re-applied because colorwc often snaps PWM to 100.
+func applyLookFrom(c *govee.Client, prev *Look, look Look, confirm bool) error {
+	sendColor := prev == nil || !sameAppearance(*prev, look)
+	sendBright := prev == nil || prev.Brightness != look.Brightness || sendColor
+	if !sendColor && !sendBright {
+		return nil
+	}
+	if look.Temp > 0 && sendColor {
+		if confirm {
+			if _, err := c.ExecTemp(look.Temp); err != nil {
+				return err
+			}
+		} else if err := c.PushTemp(look.Temp); err != nil {
 			return err
 		}
-	} else if look.Color != nil {
-		if _, err := c.ExecColor(*look.Color); err != nil {
+	} else if look.Color != nil && sendColor {
+		if confirm {
+			if _, err := c.ExecColor(*look.Color); err != nil {
+				return err
+			}
+		} else if err := c.PushColor(*look.Color); err != nil {
 			return err
 		}
 	}
-	_, err := c.ExecBrightness(look.Brightness)
-	return err
-}
-
-// pushLookAppearance is the mid-ramp path: two-packet bursts, no status wait.
-// Confirming every frame (200ms+ each) made 1.5s steps; the bulb can't do a
-// smooth curve if we block on UDP status 2× per tick.
-func pushLookAppearance(c *govee.Client, look Look) error {
-	if look.Temp > 0 {
-		if err := c.PushTemp(look.Temp); err != nil {
-			return err
-		}
-	} else if look.Color != nil {
-		if err := c.PushColor(*look.Color); err != nil {
-			return err
-		}
+	if !sendBright {
+		return nil
+	}
+	if confirm {
+		_, err := c.ExecBrightness(look.Brightness)
+		return err
 	}
 	return c.PushBrightness(look.Brightness)
 }
@@ -113,7 +145,7 @@ func lerpLook(from, to Look, t float64) Look {
 	}
 	b := lerpBrightness(from.Brightness, to.Brightness, t)
 	if kelvinRamp(from, to) {
-		k := roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), t))
+		k := govee.ClampKelvin(roundKelvin(govee.Lerp(float64(from.Temp), float64(to.Temp), t)))
 		return Look{Temp: k, Brightness: b}
 	}
 	rgb := govee.LerpRGB(RGBForLook(from), RGBForLook(to), t)
@@ -255,6 +287,9 @@ func (r *Runner) StartRamp(name string, from, to Look, duration time.Duration, e
 // StartPreview plays from→to as fast as the bulb confirms each look.
 func (r *Runner) StartPreview(name string, from, to Look, endOff bool) int {
 	frames := PreviewLooks(from, to)
+	if kelvinRamp(from, to) && (from.Temp < govee.KelvinMin || to.Temp < govee.KelvinMin) {
+		log.Printf("gvl: preview %s kelvin clamped to LAN floor %dK (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
+	}
 	ctx := r.start(name)
 	go func() {
 		defer r.clearIf(name)
@@ -268,29 +303,38 @@ func (r *Runner) StartPreview(name string, from, to Look, endOff bool) int {
 func (r *Runner) runPreview(ctx context.Context, name string, frames []Look, endOff bool) error {
 	log.Printf("gvl: preview %s frames=%d end_off=%v", name, len(frames), endOff)
 	t0 := time.Now()
+	var prev *Look
+	var runErr error
 	for i, look := range frames {
 		if err := ctx.Err(); err != nil {
 			log.Printf("gvl: preview %s cancelled at %d/%d", name, i, len(frames))
-			return err
+			runErr = err
+			break
 		}
 		var err error
 		if i == 0 {
 			err = ApplyLook(r.client, look)
 		} else {
-			err = applyLookAppearance(r.client, look)
+			err = applyLookFrom(r.client, prev, look, true)
 		}
 		if err != nil {
-			return fmt.Errorf("frame %d/%d: %w", i+1, len(frames), err)
+			runErr = fmt.Errorf("frame %d/%d: %w", i+1, len(frames), err)
+			log.Printf("gvl: preview %s: %v", name, runErr)
+			break
 		}
+		cp := copyLook(look)
+		prev = &cp
 	}
-	if endOff {
+	if endOff && ctx.Err() == nil {
 		if _, err := r.client.ExecTurn(false); err != nil {
 			log.Printf("gvl: preview %s end-off failed: %v", name, err)
-			return err
+			if runErr == nil {
+				runErr = err
+			}
 		}
 	}
-	log.Printf("gvl: preview %s done frames=%d in %s", name, len(frames), time.Since(t0).Round(time.Millisecond))
-	return nil
+	log.Printf("gvl: preview %s done frames=%d in %s err=%v", name, len(frames), time.Since(t0).Round(time.Millisecond), runErr)
+	return runErr
 }
 
 func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, duration time.Duration, endOff bool) error {
@@ -298,9 +342,13 @@ func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, durati
 		duration = time.Minute
 	}
 	log.Printf("gvl: ramp %s start duration=%s kelvin=%v end_off=%v", name, duration.Round(time.Second), kelvinRamp(from, to), endOff)
+	if kelvinRamp(from, to) && (from.Temp < govee.KelvinMin || to.Temp < govee.KelvinMin) {
+		log.Printf("gvl: ramp %s kelvin clamped to LAN floor %dK (requested %d→%d)", name, govee.KelvinMin, from.Temp, to.Temp)
+	}
 	if err := ApplyLook(r.client, from); err != nil {
 		return fmt.Errorf("start look: %w", err)
 	}
+	prev := copyLook(from)
 
 	const frame = 400 * time.Millisecond
 	const confirmEvery = 10 * time.Second
@@ -321,13 +369,15 @@ func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, durati
 			look := lerpLook(from, to, smoothstep(t))
 			var err error
 			if now.Sub(lastConfirm) >= confirmEvery {
-				err = applyLookAppearance(r.client, look)
+				err = applyLookFrom(r.client, &prev, look, true)
 				lastConfirm = now
 			} else {
-				err = pushLookAppearance(r.client, look)
+				err = applyLookFrom(r.client, &prev, look, false)
 			}
 			if err != nil {
 				log.Printf("gvl: ramp %s frame: %v", name, err)
+			} else {
+				prev = copyLook(look)
 			}
 		}
 	}
