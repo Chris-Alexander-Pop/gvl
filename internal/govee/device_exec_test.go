@@ -30,6 +30,18 @@ func TestTempMatches(t *testing.T) {
 	}
 }
 
+func TestClampKelvinLanFloor(t *testing.T) {
+	if ClampKelvin(0) != 0 {
+		t.Fatal("unset temp must stay 0")
+	}
+	if ClampKelvin(1800) != KelvinMin || ClampKelvin(2699) != KelvinMin {
+		t.Fatal("below floor should snap to 2700")
+	}
+	if ClampKelvin(2700) != 2700 || ClampKelvin(4000) != 4000 {
+		t.Fatal("at/above floor should pass through")
+	}
+}
+
 func TestKelvinToRGBNeutralIsWarmDominant(t *testing.T) {
 	c := KelvinToRGB(4000)
 	if c.B > c.R {

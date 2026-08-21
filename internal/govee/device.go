@@ -129,7 +129,7 @@ func (c *Client) ExecTurn(on bool) (*Status, error) {
 	if on {
 		want = 1
 	}
-	return c.execUntil("turn",
+	return c.execUntil("turn", true,
 		func() error { return c.PushTurn(on) },
 		func(st *Status) bool { return st.OnOff == want },
 		func(st *Status) string {
@@ -141,7 +141,7 @@ func (c *Client) ExecTurn(on bool) (*Status, error) {
 // ExecBrightness sets brightness, retries until status matches, and returns status.
 func (c *Client) ExecBrightness(v int) (*Status, error) {
 	want := ClampBrightness(v)
-	return c.execUntil("brightness",
+	return c.execUntil("brightness", true,
 		func() error { return c.PushBrightness(want) },
 		func(st *Status) bool { return st.Brightness == want },
 		func(st *Status) string {
@@ -152,7 +152,7 @@ func (c *Client) ExecBrightness(v int) (*Status, error) {
 
 // ExecColor sets RGB color, retries until status matches, and returns status.
 func (c *Client) ExecColor(rgb RGB) (*Status, error) {
-	return c.execUntil("color",
+	return c.execUntil("color", true,
 		func() error { return c.PushColor(rgb) },
 		func(st *Status) bool { return colorMatches(st, rgb) },
 		func(st *Status) string {
@@ -162,12 +162,18 @@ func (c *Client) ExecColor(rgb RGB) (*Status, error) {
 }
 
 // ExecTemp sets color temperature, retries until status matches, and returns status.
+// Below KelvinMin the LAN API is a no-op; we snap to the floor instead of
+// re-sending colorwc (that pulse is what Test Ramp looked like).
 func (c *Client) ExecTemp(kelvin int) (*Status, error) {
-	return c.execUntil("temp",
-		func() error { return c.PushTemp(kelvin) },
-		func(st *Status) bool { return tempMatches(st, kelvin) },
+	want := ClampKelvin(kelvin)
+	if want != kelvin && kelvin > 0 {
+		trace.Printf("temp %dK clamped to %dK (LAN floor)", kelvin, want)
+	}
+	return c.execUntil("temp", false,
+		func() error { return c.PushTemp(want) },
+		func(st *Status) bool { return tempMatches(st, want) },
 		func(st *Status) string {
-			return fmt.Sprintf("temp still %s (want %s)", FormatColor(st.Color, st.ColorTemInKelvin), FormatColor(RGB{}, kelvin))
+			return fmt.Sprintf("temp still %s (want %s)", FormatColor(st.Color, st.ColorTemInKelvin), FormatColor(RGB{}, want))
 		},
 	)
 }
@@ -194,7 +200,7 @@ func (c *Client) PushColor(rgb RGB) error {
 func (c *Client) PushTemp(kelvin int) error {
 	return c.sendBurst("colorwc", map[string]any{
 		"color":            map[string]int{"r": 0, "g": 0, "b": 0},
-		"colorTemInKelvin": kelvin,
+		"colorTemInKelvin": ClampKelvin(kelvin),
 	})
 }
 
@@ -214,26 +220,36 @@ func (c *Client) lockOp(reason string) func() {
 const execAttempts = 5
 
 // execUntil sends a command, reads status, and retries until ok(st) or attempts are exhausted.
-func (c *Client) execUntil(name string, send func() error, ok func(*Status) bool, mismatch func(*Status) string) (*Status, error) {
+// If resend is false, colorwc/etc is only sent again when status itself failed
+// (packet drop). A mismatch after the device answered is polled, not re-blasted —
+// re-sending temp on a stuck H60A1 is a visible pulse.
+func (c *Client) execUntil(name string, resend bool, send func() error, ok func(*Status) bool, mismatch func(*Status) string) (*Status, error) {
 	unlock := c.lockOp("exec " + name)
 	defer unlock()
 
 	t0 := time.Now()
 	var lastErr error
+	var lastSt *Status
+	heard := false
 	for attempt := 0; attempt < execAttempts; attempt++ {
 		delay := settleDelay(attempt)
-		trace.Printf("exec %s attempt %d/%d settle=%s", name, attempt+1, execAttempts, delay)
-		if err := send(); err != nil {
-			trace.Printf("exec %s send: %v", name, err)
-			return nil, err
+		trace.Printf("exec %s attempt %d/%d settle=%s heard=%v resend=%v", name, attempt+1, execAttempts, delay, heard, resend)
+		if !heard || resend {
+			if err := send(); err != nil {
+				trace.Printf("exec %s send: %v", name, err)
+				return lastSt, err
+			}
 		}
 		time.Sleep(delay)
 		st, err := c.statusLoop(1500 * time.Millisecond)
 		if err != nil {
 			trace.Printf("exec %s status: %v", name, err)
 			lastErr = err
+			heard = false
 			continue
 		}
+		heard = true
+		lastSt = st
 		if ok(st) {
 			trace.Printf("exec %s ok attempt=%d total=%s look=%s %d%%",
 				name, attempt+1, time.Since(t0).Round(time.Millisecond),
@@ -247,7 +263,7 @@ func (c *Client) execUntil(name string, send func() error, ok func(*Status) bool
 		lastErr = fmt.Errorf("no response from device")
 	}
 	trace.Printf("exec %s failed after %s: %v", name, time.Since(t0).Round(time.Millisecond), lastErr)
-	return nil, lastErr
+	return lastSt, lastErr
 }
 
 // colorMatches reports whether status reflects the requested RGB (not a colour-temp mode).

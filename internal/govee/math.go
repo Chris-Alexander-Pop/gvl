@@ -137,3 +137,17 @@ func clamp(v, lo, hi int) int {
 func ClampBrightness(v int) int {
 	return clamp(v, 0, 100)
 }
+
+// KelvinMin is the warmest colour-temp the H60A1 accepts over LAN.
+// Requests below this (including the "candle" 1800K preset) are ignored;
+// the bulb stays at 2700K. Re-sending colorwc in that state is a visible pulse.
+const KelvinMin = 2700
+
+// ClampKelvin snaps a requested colour-temp up to the LAN floor.
+// 0 is left unset (not a temperature look).
+func ClampKelvin(k int) int {
+	if k > 0 && k < KelvinMin {
+		return KelvinMin
+	}
+	return k
+}

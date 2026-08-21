@@ -17,8 +17,8 @@ func TestKelvinRampSleepLooks(t *testing.T) {
 		t.Fatalf("t=0: %+v", start)
 	}
 	end := lerpLook(from, to, 1)
-	if end.Temp != 1800 || end.Color != nil || end.Brightness != 1 {
-		t.Fatalf("t=1: %+v", end)
+	if end.Temp != govee.KelvinMin || end.Color != nil || end.Brightness != 1 {
+		t.Fatalf("t=1: %+v (LAN floor is %dK, not candle 1800K)", end, govee.KelvinMin)
 	}
 	mid := lerpLook(from, to, 0.5)
 	if mid.Color != nil {
@@ -32,7 +32,7 @@ func TestKelvinRampSleepLooks(t *testing.T) {
 	}
 }
 
-func TestPreviewLooksSleepIsDistinctAndEndsAtCandle(t *testing.T) {
+func TestPreviewLooksSleepIsDistinctAndEndsAtLanFloor(t *testing.T) {
 	from := Look{Temp: 4000, Brightness: 100}
 	to := Look{Temp: 1800, Brightness: 1}
 	frames := PreviewLooks(from, to)
@@ -43,13 +43,45 @@ func TestPreviewLooksSleepIsDistinctAndEndsAtCandle(t *testing.T) {
 		t.Fatalf("start %+v", frames[0])
 	}
 	last := frames[len(frames)-1]
-	if last.Temp != 1800 || last.Brightness != 1 {
-		t.Fatalf("end %+v", last)
+	if last.Temp != govee.KelvinMin || last.Brightness != 1 {
+		t.Fatalf("end %+v want %dK @ 1%%", last, govee.KelvinMin)
 	}
 	for i := 1; i < len(frames); i++ {
 		if looksEqual(frames[i-1], frames[i]) {
 			t.Fatalf("duplicate frame %d", i)
 		}
+		if frames[i].Temp > 0 && frames[i].Temp < govee.KelvinMin {
+			t.Fatalf("frame %d below LAN floor: %+v", i, frames[i])
+		}
+	}
+}
+
+func TestPreviewLooksConstantBrightnessIsKelvinOnly(t *testing.T) {
+	from := Look{Temp: 4000, Brightness: 1}
+	to := Look{Temp: 1800, Brightness: 1}
+	frames := PreviewLooks(from, to)
+	if len(frames) < 10 || len(frames) > 20 {
+		t.Fatalf("expected ~14 kelvin steps at 1%%, got %d", len(frames))
+	}
+	for _, f := range frames {
+		if f.Brightness != 1 || f.Temp < govee.KelvinMin {
+			t.Fatalf("%+v", f)
+		}
+	}
+	if frames[len(frames)-1].Temp != govee.KelvinMin {
+		t.Fatalf("end %+v", frames[len(frames)-1])
+	}
+}
+
+func TestApplyLookFromSkipsRedundantKelvin(t *testing.T) {
+	a := Look{Temp: 4000, Brightness: 100}
+	b := Look{Temp: 4000, Brightness: 99}
+	if !sameAppearance(a, b) {
+		t.Fatal("same kelvin should be same appearance")
+	}
+	c := Look{Temp: 3900, Brightness: 99}
+	if sameAppearance(b, c) {
+		t.Fatal("kelvin change must be a new appearance")
 	}
 }
 
