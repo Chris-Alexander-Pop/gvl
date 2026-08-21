@@ -93,34 +93,25 @@ func (c *Client) sendBurst(cmd string, data any) error {
 	return c.send(cmd, data)
 }
 
-// Turn sets power on (true) or off (false). Single datagram — prefer ExecTurn for CLI.
+// Turn sets power on (true) or off (false). Always a two-packet burst.
+// Prefer ExecTurn when the result must be confirmed.
 func (c *Client) Turn(on bool) error {
-	v := 0
-	if on {
-		v = 1
-	}
-	return c.send("turn", map[string]int{"value": v})
+	return c.PushTurn(on)
 }
 
-// Brightness sets brightness 0-100.
+// Brightness sets brightness 0-100. Always a two-packet burst.
 func (c *Client) Brightness(v int) error {
-	return c.send("brightness", map[string]int{"value": ClampBrightness(v)})
+	return c.PushBrightness(v)
 }
 
-// Color sets an RGB color (clears color temperature).
+// Color sets an RGB color (clears color temperature). Always a two-packet burst.
 func (c *Client) Color(rgb RGB) error {
-	return c.send("colorwc", map[string]any{
-		"color":            map[string]int{"r": rgb.R, "g": rgb.G, "b": rgb.B},
-		"colorTemInKelvin": 0,
-	})
+	return c.PushColor(rgb)
 }
 
-// Temp sets color temperature in Kelvin.
+// Temp sets color temperature in Kelvin. Always a two-packet burst.
 func (c *Client) Temp(kelvin int) error {
-	return c.send("colorwc", map[string]any{
-		"color":            map[string]int{"r": 0, "g": 0, "b": 0},
-		"colorTemInKelvin": kelvin,
-	})
+	return c.PushTemp(kelvin)
 }
 
 func turnPayload(on bool) map[string]int {
@@ -174,7 +165,7 @@ func (c *Client) ExecColor(rgb RGB) (*Status, error) {
 func (c *Client) ExecTemp(kelvin int) (*Status, error) {
 	return c.execUntil("temp",
 		func() error { return c.PushTemp(kelvin) },
-		func(st *Status) bool { return st.ColorTemInKelvin == kelvin },
+		func(st *Status) bool { return tempMatches(st, kelvin) },
 		func(st *Status) string {
 			return fmt.Sprintf("temp still %s (want %s)", FormatColor(st.Color, st.ColorTemInKelvin), FormatColor(RGB{}, kelvin))
 		},
@@ -262,6 +253,19 @@ func (c *Client) execUntil(name string, send func() error, ok func(*Status) bool
 // colorMatches reports whether status reflects the requested RGB (not a colour-temp mode).
 func colorMatches(st *Status, want RGB) bool {
 	return st.ColorTemInKelvin == 0 && st.Color == want
+}
+
+// tempMatches reports whether the bulb is in kelvin mode near the requested value.
+// Govee often snaps to 100 K steps, so exact equality is too brittle for ramps.
+func tempMatches(st *Status, kelvin int) bool {
+	if st == nil || st.ColorTemInKelvin <= 0 {
+		return false
+	}
+	d := st.ColorTemInKelvin - kelvin
+	if d < 0 {
+		d = -d
+	}
+	return d <= 100
 }
 
 func settleDelay(attempt int) time.Duration {
