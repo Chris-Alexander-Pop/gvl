@@ -2,6 +2,7 @@ package mode
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Chris-Alexander-Pop/gvl/internal/govee"
 )
@@ -96,6 +97,114 @@ func TestPreviewLooksConstantBrightnessSwitchesToRGB(t *testing.T) {
 	}
 	if !sawHot {
 		t.Fatal("colour phase should start near 100% even when from-brightness is 1")
+	}
+}
+
+func TestDesiredAtFollowsRampUntilEndOff(t *testing.T) {
+	r := NewRunner(nil)
+	from := Look{Temp: 4000, Brightness: 100}
+	to := Look{Temp: 1800, Brightness: 1}
+	start := time.Date(2026, 1, 2, 7, 0, 0, 0, time.UTC)
+	r.arm(rampSpec{
+		name: "wake:test", from: from, to: to,
+		start: start, duration: 30 * time.Minute,
+	})
+	mid, ok := r.DesiredAt(start.Add(15 * time.Minute))
+	if !ok {
+		t.Fatal("ramp should have a look")
+	}
+	want := lerpLook(from, to, 0.5, 0)
+	if !looksEqual(mid, want) {
+		t.Fatalf("mid %+v want %+v", mid, want)
+	}
+	end, ok := r.DesiredAt(start.Add(time.Hour))
+	if !ok || !looksEqual(end, lerpLook(from, to, 1, 0)) {
+		t.Fatalf("past the end got %+v ok=%v", end, ok)
+	}
+	r.settle(true)
+	if _, ok := r.DesiredAt(start.Add(time.Hour)); ok {
+		t.Fatal("end_off should stop pushing a look")
+	}
+}
+
+func TestStopFreezesRampLook(t *testing.T) {
+	r := NewRunner(nil)
+	from := Look{Temp: 4000, Brightness: 80}
+	to := Look{Temp: 5000, Brightness: 80}
+	r.arm(rampSpec{
+		name: "wake:test", from: from, to: to,
+		start: time.Now(), duration: 30 * time.Minute,
+	})
+	r.Stop()
+	got, ok := r.DesiredAt(time.Now())
+	if !ok {
+		t.Fatal("stopped ramp should keep a look")
+	}
+	if got.Temp != 4000 || got.Brightness != 80 {
+		t.Fatalf("freeze at the start look, got %+v", got)
+	}
+}
+
+func TestSetLookReplacesRamp(t *testing.T) {
+	r := NewRunner(nil)
+	r.arm(rampSpec{
+		name:  "sleep:test",
+		from:  Look{Temp: 4000, Brightness: 40},
+		to:    Look{Temp: 2700, Brightness: 5},
+		start: time.Now(), duration: time.Hour,
+	})
+	blue := govee.NamedColors["blue"]
+	r.SetLook(Look{Color: &blue, Brightness: 12})
+	got, ok := r.DesiredAt(time.Now())
+	if !ok || got.Color == nil || *got.Color != blue || got.Brightness != 12 || got.Temp != 0 {
+		t.Fatalf("manual look %+v", got)
+	}
+}
+
+func TestHoldFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/hold.json"
+	r := NewRunner(nil)
+	r.UseHoldFile(path)
+	blue := govee.NamedColors["blue"]
+	r.SetLook(Look{Color: &blue, Brightness: 20})
+	loaded := NewRunner(nil)
+	loaded.UseHoldFile(path)
+	got, ok := loaded.DesiredAt(time.Now())
+	if !ok || got.Color == nil || *got.Color != blue || got.Brightness != 20 {
+		t.Fatalf("reloaded %+v ok=%v", got, ok)
+	}
+}
+
+func TestStatusMatchesKelvinSlack(t *testing.T) {
+	st := &govee.Status{OnOff: 1, Brightness: 40, ColorTemInKelvin: 4000}
+	if !StatusMatches(st, Look{Temp: 4050, Brightness: 40}) {
+		t.Fatal("100K slack")
+	}
+	if StatusMatches(st, Look{Temp: 4200, Brightness: 40}) {
+		t.Fatal("200K off should not match")
+	}
+	if StatusMatches(&govee.Status{OnOff: 0, Brightness: 40, ColorTemInKelvin: 4000}, Look{Temp: 4000, Brightness: 10}) {
+		t.Fatal("brightness differs")
+	}
+}
+
+func TestBlocksReconcileSkipsModes(t *testing.T) {
+	r := NewRunner(nil)
+	if r.BlocksReconcile() {
+		t.Fatal("idle runner can reconcile")
+	}
+	r.mu.Lock()
+	r.kind = "wake:weekday"
+	r.mu.Unlock()
+	if r.BlocksReconcile() {
+		t.Fatal("wake ramp should stay reconcilable")
+	}
+	r.mu.Lock()
+	r.kind = "aurora"
+	r.mu.Unlock()
+	if !r.BlocksReconcile() {
+		t.Fatal("animated mode owns the bulb")
 	}
 }
 

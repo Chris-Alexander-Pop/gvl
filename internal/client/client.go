@@ -78,16 +78,17 @@ func (c *Client) Health() error {
 	return c.do(http.MethodGet, "/health", nil, nil)
 }
 
-// Status returns device status from the daemon.
-func (c *Client) Status() (*govee.Status, string, error) {
+// Status returns device status from the daemon, plus the active ramp/mode name.
+func (c *Client) Status() (*govee.Status, string, string, error) {
 	var resp struct {
 		IP     string        `json:"ip"`
+		Mode   string        `json:"mode"`
 		Status *govee.Status `json:"status"`
 	}
 	if err := c.do(http.MethodGet, "/v1/status", nil, &resp); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	return resp.Status, resp.IP, nil
+	return resp.Status, resp.IP, resp.Mode, nil
 }
 
 // DeviceCmd sends a simple device command.

@@ -72,8 +72,7 @@ gvl schedule next weekday-wake --at 09:00 --count 2 --duration 45 --to-temp dayl
 gvl schedule next weekday-wake --clear
 ```
 
-Wake ramps turn the light on and ease from a start look to an end look over N minutes.  
-Sleep ramps dim toward a warm/low look and can power off at the end.
+Wake and sleep ramps ease from a start look to an end look over N minutes. If the bulb is off, the ramp does not turn it on. About once a minute `gvld` puts the look the ramp should be at, and only while the bulb is already on, so turning the light on mid-ramp catches up. Sleep can still power off at the end when the bulb is on.
 
 The H60A1 white LEDs bottom out at **2700K** over LAN (the app’s 2200K mixes RGB into
 warm-white; `colorwc` kelvin does not). Sleep targets below that — including candle

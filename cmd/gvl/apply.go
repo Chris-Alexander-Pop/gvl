@@ -99,7 +99,7 @@ func applySettings(tokens []string) error {
 		}
 		last, lastIP = st, ip
 	}
-	emitStatus(last, lastIP)
+	emitStatus(last, lastIP, "")
 	return nil
 }
 

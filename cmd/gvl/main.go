@@ -112,15 +112,27 @@ func deviceClient() *govee.Client {
 	return govee.NewClient(flagAddress)
 }
 
-func emitStatus(st *govee.Status, ip string) {
+type statusPayload struct {
+	govee.Status
+	Mode string `json:"mode,omitempty"`
+}
+
+func emitStatus(st *govee.Status, ip, mode string) {
 	if flagQuiet {
 		return
 	}
 	if flagJSON {
-		fmt.Printf("%s\n", mustJSON(st))
+		out := statusPayload{Mode: mode}
+		if st != nil {
+			out.Status = *st
+		}
+		fmt.Printf("%s\n", mustJSON(out))
 		return
 	}
 	fmt.Println(ui.FormatStatus(st, ip))
+	if mode != "" {
+		fmt.Printf("ramp: %s\n", mode)
+	}
 }
 
 func mustJSON(v any) string {
@@ -171,18 +183,18 @@ var statusCmd = &cobra.Command{
 	Short: "Show current state",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if useDaemon() {
-			st, ip, err := api().Status()
+			st, ip, mode, err := api().Status()
 			if err != nil {
 				return err
 			}
-			emitStatus(st, ip)
+			emitStatus(st, ip, mode)
 			return nil
 		}
 		st, err := deviceClient().Status(2 * time.Second)
 		if err != nil {
 			return err
 		}
-		emitStatus(st, flagAddress)
+		emitStatus(st, flagAddress, "")
 		return nil
 	},
 }
@@ -285,7 +297,7 @@ func simpleDevice(cmdName string, payload map[string]any) error {
 	if err != nil {
 		return err
 	}
-	emitStatus(st, ip)
+	emitStatus(st, ip, "")
 	return nil
 }
 
@@ -385,4 +397,3 @@ var presetsCmd = &cobra.Command{
 		fmt.Println(ui.FormatPresets())
 	},
 }
-

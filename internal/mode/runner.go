@@ -27,6 +27,11 @@ func ApplyLook(c *govee.Client, look Look) error {
 	return applyLookAppearance(c, look)
 }
 
+// ApplyAppearance sets colour or temperature and brightness without changing power.
+func ApplyAppearance(c *govee.Client, look Look) error {
+	return applyLookAppearance(c, look)
+}
+
 func applyLookAppearance(c *govee.Client, look Look) error {
 	return applyLookFrom(c, nil, look, true)
 }
@@ -334,6 +339,23 @@ type Runner struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	kind   string
+
+	holdPath  string
+	look      Look
+	hasLook   bool
+	asleep    bool // sleep ramp finished with end_off; do not push a look
+	seenOn    bool
+	seenKnown bool
+	ramp      *rampSpec
+}
+
+type rampSpec struct {
+	name     string
+	from, to Look
+	start    time.Time
+	duration time.Duration
+	endOff   bool
+	splitPct int
 }
 
 // NewRunner creates a mode runner bound to a device client.
@@ -341,15 +363,24 @@ func NewRunner(client *govee.Client) *Runner {
 	return &Runner{client: client}
 }
 
-// Stop cancels any running mode or ramp.
+// Stop cancels any running mode or ramp. An in-progress ramp freezes at the
+// look it had reached so a later turn-on can still catch up.
 func (r *Runner) Stop() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	if r.ramp != nil {
+		elapsed := time.Since(r.ramp.start).Seconds() / r.ramp.duration.Seconds()
+		r.look = copyLook(lerpLook(r.ramp.from, r.ramp.to, elapsed, r.ramp.splitPct))
+		r.hasLook = true
+		r.asleep = false
+		r.ramp = nil
+	}
 	if r.cancel != nil {
 		r.cancel()
 		r.cancel = nil
 	}
 	r.kind = ""
+	r.persistLocked()
+	r.mu.Unlock()
 }
 
 // Running returns the active mode/ramp name, or empty.
@@ -388,14 +419,19 @@ func (r *Runner) StartMode(cfg Config) {
 }
 
 // StartRamp runs a one-shot from→to ramp over duration.
+// The ramp never turns the bulb on. If it is off, the look is tracked and
+// applied later by the minute reconcile once the bulb is already on.
 func (r *Runner) StartRamp(name string, from, to Look, duration time.Duration, endOff bool, splitPct int) {
+	if duration <= 0 {
+		duration = time.Minute
+	}
+	spec := rampSpec{
+		name: name, from: from, to: to,
+		start: time.Now(), duration: duration, endOff: endOff, splitPct: splitPct,
+	}
 	ctx := r.start(name)
-	go func() {
-		defer r.clearIf(name)
-		if err := r.runRamp(ctx, name, from, to, duration, endOff, splitPct); err != nil && ctx.Err() == nil {
-			log.Printf("gvl: ramp %s: %v", name, err)
-		}
-	}()
+	r.arm(spec)
+	go r.launch(ctx, spec)
 }
 
 // StartPreview plays from→to as fast as the bulb confirms each look.
@@ -451,35 +487,57 @@ func (r *Runner) runPreview(ctx context.Context, name string, frames []Look, end
 	return runErr
 }
 
-func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, duration time.Duration, endOff bool, splitPct int) error {
-	if duration <= 0 {
-		duration = time.Minute
+func (r *Runner) launch(ctx context.Context, spec rampSpec) {
+	defer r.clearIf(spec.name)
+	if err := r.playRamp(ctx, spec); err != nil && ctx.Err() == nil {
+		log.Printf("gvl: ramp %s: %v", spec.name, err)
 	}
-	s := phaseSplit(from, to, splitPct)
+}
+
+func (r *Runner) playRamp(ctx context.Context, spec rampSpec) error {
+	s := phaseSplit(spec.from, spec.to, spec.splitPct)
 	log.Printf("gvl: ramp %s start duration=%s kelvin=%v two_phase=%v split=%.0f/%.0f end_off=%v",
-		name, duration.Round(time.Second), kelvinRamp(from, to), s > 0, s*100, (1-s)*100, endOff)
-	if err := ApplyLook(r.client, from); err != nil {
-		return fmt.Errorf("start look: %w", err)
+		spec.name, spec.duration.Round(time.Second), kelvinRamp(spec.from, spec.to), s > 0, s*100, (1-s)*100, spec.endOff)
+	if r.observe(spec.name) && !r.SeenOn() {
+		log.Printf("gvl: ramp %s bulb is off; tracking the look without turning it on", spec.name)
 	}
-	prev := copyLook(from)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	prev := copyLook(spec.from)
+	if r.SeenOn() {
+		if err := applyLookAppearance(r.client, spec.from); err != nil {
+			log.Printf("gvl: ramp %s start look: %v", spec.name, err)
+		}
+	}
 
 	const frame = 400 * time.Millisecond
 	const confirmEvery = 10 * time.Second
-	start := time.Now()
-	lastConfirm := start
+	lastConfirm := time.Now()
+	lastProbe := time.Now()
 	ticker := time.NewTicker(frame)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("gvl: ramp %s cancelled", name)
+			log.Printf("gvl: ramp %s cancelled", spec.name)
 			return ctx.Err()
 		case now := <-ticker.C:
-			t := now.Sub(start).Seconds() / duration.Seconds()
-			if t >= 1 {
-				return r.finishRamp(name, to, endOff)
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			look := lerpLook(from, to, t, splitPct)
+			t := now.Sub(spec.start).Seconds() / spec.duration.Seconds()
+			if t >= 1 {
+				return r.finishRamp(ctx, spec)
+			}
+			if now.Sub(lastProbe) >= confirmEvery {
+				lastProbe = now
+				r.observe(spec.name)
+			}
+			if !r.SeenOn() {
+				continue
+			}
+			look := lerpLook(spec.from, spec.to, t, spec.splitPct)
 			var err error
 			if now.Sub(lastConfirm) >= confirmEvery {
 				err = applyLookFrom(r.client, &prev, look, true)
@@ -488,7 +546,7 @@ func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, durati
 				err = applyLookFrom(r.client, &prev, look, false)
 			}
 			if err != nil {
-				log.Printf("gvl: ramp %s frame: %v", name, err)
+				log.Printf("gvl: ramp %s frame: %v", spec.name, err)
 			} else {
 				prev = copyLook(look)
 			}
@@ -496,20 +554,34 @@ func (r *Runner) runRamp(ctx context.Context, name string, from, to Look, durati
 	}
 }
 
-func (r *Runner) finishRamp(name string, to Look, endOff bool) error {
-	if endOff {
-		if _, err := r.client.ExecTurn(false); err != nil {
-			log.Printf("gvl: ramp %s end-off failed: %v", name, err)
-			return err
-		}
-		log.Printf("gvl: ramp %s ended (off)", name)
-		return nil
-	}
-	if err := applyLookAppearance(r.client, to); err != nil {
-		log.Printf("gvl: ramp %s end look failed: %v", name, err)
+func (r *Runner) finishRamp(ctx context.Context, spec rampSpec) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	log.Printf("gvl: ramp %s ended (look)", name)
+	r.observe(spec.name)
+	r.settle(spec.endOff)
+	if spec.endOff {
+		if !r.SeenOn() {
+			log.Printf("gvl: ramp %s ended (bulb already off)", spec.name)
+			return nil
+		}
+		if _, err := r.client.ExecTurn(false); err != nil {
+			log.Printf("gvl: ramp %s end-off failed: %v", spec.name, err)
+			return err
+		}
+		r.SetSeenOn(false)
+		log.Printf("gvl: ramp %s ended (off)", spec.name)
+		return nil
+	}
+	if !r.SeenOn() {
+		log.Printf("gvl: ramp %s ended; holding the end look until the bulb is on", spec.name)
+		return nil
+	}
+	if err := applyLookAppearance(r.client, spec.to); err != nil {
+		log.Printf("gvl: ramp %s end look failed: %v", spec.name, err)
+		return err
+	}
+	log.Printf("gvl: ramp %s ended (look)", spec.name)
 	return nil
 }
 

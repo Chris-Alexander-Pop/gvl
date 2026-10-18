@@ -71,6 +71,7 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 	engine := schedule.NewEngine(store, runner, client)
+	runner.UseHoldFile(filepath.Join(opts.DataDir, "hold.json"))
 	s := &Server{
 		opts:   opts,
 		client: client,
@@ -89,6 +90,8 @@ func New(opts Options) (*Server, error) {
 // Start begins the schedule loop and HTTP server (blocking).
 func (s *Server) Start() error {
 	stop := make(chan struct{})
+	s.runner.Resume()
+	go s.reconcileLoop(stop)
 	go s.engine.Run(stop)
 	defer close(stop)
 
@@ -219,6 +222,15 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		log.Printf("gvld: device %s error: %v", cmd, err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	s.remember(cmd, body, st)
+	if cmd == "on" {
+		updated, cerr := s.catchUp(st)
+		if cerr != nil {
+			log.Printf("gvld: catch-up after on: %v", cerr)
+		} else if updated != nil {
+			st = updated
+		}
 	}
 	writeJSON(w, 200, st)
 }
