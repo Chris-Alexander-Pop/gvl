@@ -306,6 +306,81 @@ func mustDay(date string, loc *time.Location) time.Time {
 	return t
 }
 
+// PowerHold is what startup should do with bulb power given the schedules.
+type PowerHold int
+
+const (
+	// PowerLeave means the hold file is already newer than the last settled ramp.
+	PowerLeave PowerHold = iota
+	// PowerOff means the latest settled ramp is a sleep that ends by turning off.
+	PowerOff
+	// PowerClear means a later wake (or a sleep that stays on) superseded an off.
+	PowerClear
+)
+
+// ScheduledPower reports whether the bulb should be held off.
+// holdUpdated is when the hold file was last written. Zero means there is no hold file.
+func ScheduledPower(entries []Entry, now, holdUpdated time.Time) PowerHold {
+	end, kind, endOff, ok := LatestSettled(entries, now)
+	if !ok {
+		return PowerLeave
+	}
+	if !holdUpdated.IsZero() && !holdUpdated.Before(end) {
+		return PowerLeave
+	}
+	if kind == KindSleep && endOff {
+		return PowerOff
+	}
+	return PowerClear
+}
+
+// LatestSettled is the most recent wake or sleep occurrence whose end is at or before now.
+// A skip patch hides that occurrence. Occurrences still in progress are not settled.
+func LatestSettled(entries []Entry, now time.Time) (end time.Time, kind Kind, endOff bool, ok bool) {
+	for _, e := range entries {
+		if !e.Enabled || (e.Kind != KindWake && e.Kind != KindSleep) {
+			continue
+		}
+		day := startOfDay(now, locOf(e))
+		for i := 0; i < 3; i++ {
+			occEnd, valid := settledEnd(e, day)
+			if valid && !occEnd.After(now) && (!ok || occEnd.After(end)) {
+				end, kind, endOff, ok = occEnd, e.Kind, e.EndOff, true
+			}
+			day = day.Add(-24 * time.Hour)
+		}
+	}
+	return end, kind, endOff, ok
+}
+
+func settledEnd(e Entry, day time.Time) (time.Time, bool) {
+	loc := locOf(e)
+	localDay := day.In(loc)
+	if !matchesDay(e, localDay) {
+		return time.Time{}, false
+	}
+	date := localDay.Format("2006-01-02")
+	p := patchForDate(e, date)
+	if p != nil && p.Skip {
+		return time.Time{}, false
+	}
+	var start time.Time
+	var err error
+	if p != nil {
+		start, err = p.FireTime(e)
+	} else {
+		start, err = ClockOn(localDay, e.At, loc)
+	}
+	if err != nil {
+		return time.Time{}, false
+	}
+	dur := time.Duration(e.DurationMin) * time.Minute
+	if dur <= 0 {
+		dur = 30 * time.Minute
+	}
+	return start.Add(dur), true
+}
+
 // StalePatchDates are overrides whose window already passed (missed Tick).
 func StalePatchDates(e Entry, now time.Time) []string {
 	var dates []string

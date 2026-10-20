@@ -285,7 +285,10 @@ func (e *Engine) Tick(now time.Time) {
 			_ = e.store.MarkFired(fresh.ID, act.OccDate)
 		case ActFire:
 			toRun := ApplyPatch(fresh, act.Patch)
-			_ = e.Fire(toRun)
+			if err := e.Fire(toRun); err != nil {
+				log.Printf("gvld: fire %s %q: %v", fresh.Kind, fresh.ID, err)
+				continue
+			}
 			if act.Patch != nil {
 				_ = e.store.RemovePatch(fresh.ID, act.OccDate)
 			}
@@ -295,10 +298,12 @@ func (e *Engine) Tick(now time.Time) {
 }
 
 // Fire runs a schedule entry immediately (does not mark last_fired unless via Tick).
+// A dark or unreachable bulb still starts the ramp. The look is tracked, and a
+// sleep end-off is remembered until the bulb can actually be turned off.
 func (e *Engine) Fire(entry Entry) error {
 	if e.BeforeFire != nil {
 		if err := e.BeforeFire(); err != nil {
-			return err
+			log.Printf("gvld: %s %q device not reachable (%v); tracking the ramp anyway", entry.Kind, entry.ID, err)
 		}
 	}
 	log.Printf("gvld: firing %s %q duration=%dm end_off=%v", entry.Kind, entry.ID, entry.DurationMin, entry.EndOff)

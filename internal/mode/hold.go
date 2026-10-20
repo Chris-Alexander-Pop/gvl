@@ -143,6 +143,66 @@ func (r *Runner) settle(endOff bool) {
 	r.persistLocked()
 }
 
+// WantsOff is true after a sleep ramp ended by turning off.
+// The minute reconcile turns the bulb off if it is seen on.
+func (r *Runner) WantsOff() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.asleep && r.ramp == nil
+}
+
+// HoldUpdated is when the hold file was last written. Zero if it was never saved.
+func (r *Runner) HoldUpdated() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.holdUpdated
+}
+
+// RampRunning reports whether a stored ramp has not reached its end yet.
+func (r *Runner) RampRunning(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ramp == nil || r.ramp.duration <= 0 {
+		return false
+	}
+	return now.Before(r.ramp.start.Add(r.ramp.duration))
+}
+
+// MarkAsleep remembers that the bulb should be off. A later turn-on is undone
+// until a wake ramp or an explicit on / colour / brightness / temperature command.
+func (r *Runner) MarkAsleep() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ramp = nil
+	r.asleep = true
+	r.hasLook = false
+	r.look = Look{}
+	r.persistLocked()
+}
+
+// ClearAsleep drops a remembered off, for an explicit turn-on.
+func (r *Runner) ClearAsleep() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.asleep {
+		return
+	}
+	r.asleep = false
+	r.persistLocked()
+}
+
+// DropFinishedRamp forgets a ramp whose end has already passed so Resume does
+// not settle it over a later schedule.
+func (r *Runner) DropFinishedRamp() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ramp == nil {
+		return
+	}
+	r.ramp = nil
+	r.persistLocked()
+}
+
 // Resume continues a ramp that was still running when the process last exited.
 func (r *Runner) Resume() {
 	r.mu.Lock()
@@ -156,7 +216,7 @@ func (r *Runner) Resume() {
 		r.mu.Unlock()
 		if spec.endOff && overdue > time.Minute {
 			r.settle(true)
-			log.Printf("gvl: ramp %s finished while down; leaving the bulb's power alone", spec.name)
+			log.Printf("gvl: ramp %s finished while down; holding the bulb off", spec.name)
 			return
 		}
 		if err := r.finishRamp(context.Background(), spec); err != nil {
@@ -199,9 +259,10 @@ func (r *Runner) observe(name string) bool {
 }
 
 type holdFile struct {
-	Asleep bool      `json:"asleep,omitempty"`
-	Look   *Look     `json:"look,omitempty"`
-	Ramp   *holdRamp `json:"ramp,omitempty"`
+	Asleep  bool      `json:"asleep,omitempty"`
+	Updated time.Time `json:"updated,omitempty"`
+	Look    *Look     `json:"look,omitempty"`
+	Ramp    *holdRamp `json:"ramp,omitempty"`
 }
 
 type holdRamp struct {
@@ -245,6 +306,7 @@ func (r *Runner) load() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.asleep = file.Asleep
+	r.holdUpdated = file.Updated
 	r.hasLook = false
 	if file.Look != nil {
 		r.look = copyLook(*file.Look)
@@ -270,7 +332,8 @@ func (r *Runner) persistLocked() {
 	if r.holdPath == "" {
 		return
 	}
-	file := holdFile{Asleep: r.asleep}
+	r.holdUpdated = time.Now()
+	file := holdFile{Asleep: r.asleep, Updated: r.holdUpdated}
 	if r.hasLook {
 		l := copyLook(r.look)
 		file.Look = &l

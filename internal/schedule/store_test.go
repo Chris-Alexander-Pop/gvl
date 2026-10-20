@@ -1,6 +1,8 @@
 package schedule
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,5 +179,69 @@ func TestBuildCount(t *testing.T) {
 	}
 	if patches[0].Date != "2026-08-17" || patches[2].Date != "2026-08-19" {
 		t.Fatalf("dates %v", patches)
+	}
+}
+
+func chalEntries() (Entry, Entry) {
+	wake := Entry{
+		ID: "wake", Enabled: true, Kind: KindWake,
+		At: "07:00", Timezone: "America/New_York", DurationMin: 5,
+	}
+	sleep := Entry{
+		ID: "sleep", Enabled: true, Kind: KindSleep, EndOff: true,
+		At: "21:00", Timezone: "America/New_York", DurationMin: 90,
+	}
+	return wake, sleep
+}
+
+func TestScheduledPowerHoldsOffAfterMissedSleep(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wake, sleep := chalEntries()
+	night := time.Date(2026, 10, 19, 23, 40, 0, 0, loc)
+	if got := ScheduledPower([]Entry{wake, sleep}, night, time.Time{}); got != PowerOff {
+		t.Fatalf("23:40 with no hold file: %v", got)
+	}
+	morningLook := time.Date(2026, 10, 19, 7, 6, 0, 0, loc)
+	if got := ScheduledPower([]Entry{wake, sleep}, night, morningLook); got != PowerOff {
+		t.Fatalf("hold from the morning wake should not block the sleep off: %v", got)
+	}
+	manual := time.Date(2026, 10, 19, 23, 10, 0, 0, loc)
+	if got := ScheduledPower([]Entry{wake, sleep}, night, manual); got != PowerLeave {
+		t.Fatalf("manual command after the ramp should stick: %v", got)
+	}
+	during := time.Date(2026, 10, 19, 21, 30, 0, 0, loc)
+	if got := ScheduledPower([]Entry{wake, sleep}, during, time.Time{}); got != PowerClear {
+		t.Fatalf("mid-ramp is not settled off yet: %v", got)
+	}
+	nextMorning := time.Date(2026, 10, 20, 8, 0, 0, 0, loc)
+	if got := ScheduledPower([]Entry{wake, sleep}, nextMorning, time.Time{}); got != PowerClear {
+		t.Fatalf("wake should supersede last night's off: %v", got)
+	}
+	sleep.Next = []Patch{{Date: "2026-10-19", Skip: true}}
+	if got := ScheduledPower([]Entry{wake, sleep}, night, time.Time{}); got != PowerClear {
+		t.Fatalf("skipped sleep should not hold off: %v", got)
+	}
+}
+
+func TestFireStartsWhenUnreachable(t *testing.T) {
+	runner := mode.NewRunner(nil)
+	t.Cleanup(runner.Stop)
+	eng := NewEngine(nil, runner, nil)
+	eng.BeforeFire = func() error { return fmt.Errorf("no response from device") }
+	_, sleep := chalEntries()
+	if err := eng.Fire(sleep); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(runner.Running(), "sleep:") {
+		t.Fatalf("running %q", runner.Running())
+	}
+	if _, ok := runner.DesiredAt(time.Now()); !ok {
+		t.Fatal("unreachable sleep ramp should still have a look")
+	}
+	if runner.WantsOff() {
+		t.Fatal("end-off is for the end of the ramp, not the start")
 	}
 }

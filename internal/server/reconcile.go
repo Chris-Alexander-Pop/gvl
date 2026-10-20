@@ -11,7 +11,8 @@ import (
 
 // reconcileLoop puts the tracked look on the bulb about once a minute.
 // It never turns the bulb on. A ramp that ran while the light was off
-// shows up the next time the bulb is already on.
+// shows up the next time the bulb is already on. A sleep ramp that ended
+// in off turns the bulb off if it is seen on.
 func (s *Server) reconcileLoop(stop <-chan struct{}) {
 	s.reconcile()
 	ticker := time.NewTicker(time.Minute)
@@ -30,8 +31,9 @@ func (s *Server) reconcile() {
 	if s.runner.BlocksReconcile() {
 		return
 	}
-	look, ok := s.runner.DesiredAt(time.Now())
-	if !ok {
+	wantsOff := s.runner.WantsOff()
+	look, haveLook := s.runner.DesiredAt(time.Now())
+	if !wantsOff && !haveLook {
 		return
 	}
 	s.deviceMu.Lock()
@@ -48,6 +50,15 @@ func (s *Server) reconcile() {
 	}
 	s.notePower(st)
 	if st.OnOff == 0 {
+		return
+	}
+	if wantsOff {
+		if _, err := s.client.ExecTurn(false); err != nil {
+			log.Printf("gvld: reconcile off: %v", err)
+			return
+		}
+		s.runner.SetSeenOn(false)
+		log.Printf("gvld: reconcile turned the bulb off (sleep ramp already ended)")
 		return
 	}
 	if mode.StatusMatches(st, look) {
@@ -99,6 +110,7 @@ func (s *Server) remember(cmd string, body map[string]any, st *govee.Status) {
 		return
 	case "on":
 		s.runner.SetSeenOn(true)
+		s.runner.ClearAsleep()
 		return
 	}
 	look, have := s.runner.DesiredAt(time.Now())

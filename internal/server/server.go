@@ -87,9 +87,26 @@ func New(opts Options) (*Server, error) {
 	return s, nil
 }
 
+// adoptSchedulePower applies a finished sleep end-off that never reached the bulb,
+// and drops a stale off once a later wake has settled.
+func (s *Server) adoptSchedulePower(now time.Time) {
+	if s.runner.RampRunning(now) {
+		return
+	}
+	switch schedule.ScheduledPower(s.store.List(), now, s.runner.HoldUpdated()) {
+	case schedule.PowerOff:
+		s.runner.MarkAsleep()
+		log.Printf("gvld: sleep ramp already finished; holding the bulb off")
+	case schedule.PowerClear:
+		s.runner.DropFinishedRamp()
+		s.runner.ClearAsleep()
+	}
+}
+
 // Start begins the schedule loop and HTTP server (blocking).
 func (s *Server) Start() error {
 	stop := make(chan struct{})
+	s.adoptSchedulePower(time.Now())
 	s.runner.Resume()
 	go s.reconcileLoop(stop)
 	go s.engine.Run(stop)

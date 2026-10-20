@@ -340,13 +340,14 @@ type Runner struct {
 	cancel context.CancelFunc
 	kind   string
 
-	holdPath  string
-	look      Look
-	hasLook   bool
-	asleep    bool // sleep ramp finished with end_off; do not push a look
-	seenOn    bool
-	seenKnown bool
-	ramp      *rampSpec
+	holdPath    string
+	holdUpdated time.Time
+	look        Look
+	hasLook     bool
+	asleep      bool // sleep ramp finished with end_off; turn the bulb off, do not push a look
+	seenOn      bool
+	seenKnown   bool
+	ramp        *rampSpec
 }
 
 type rampSpec struct {

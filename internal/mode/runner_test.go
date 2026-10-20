@@ -127,6 +127,30 @@ func TestDesiredAtFollowsRampUntilEndOff(t *testing.T) {
 	}
 }
 
+func TestEndOffWantsTheBulbOff(t *testing.T) {
+	r := NewRunner(nil)
+	r.arm(rampSpec{
+		name:  "sleep:test",
+		from:  Look{Temp: 4000, Brightness: 40},
+		to:    Look{Temp: 1800, Brightness: 1},
+		start: time.Now().Add(-time.Hour), duration: 30 * time.Minute, endOff: true,
+	})
+	if r.WantsOff() {
+		t.Fatal("a running ramp is not off yet")
+	}
+	r.settle(true)
+	if !r.WantsOff() {
+		t.Fatal("end_off should remember off even when the bulb was already dark")
+	}
+	if _, ok := r.DesiredAt(time.Now()); ok {
+		t.Fatal("end_off should stop pushing a look")
+	}
+	r.ClearAsleep()
+	if r.WantsOff() {
+		t.Fatal("explicit on clears the remembered off")
+	}
+}
+
 func TestStopFreezesRampLook(t *testing.T) {
 	r := NewRunner(nil)
 	from := Look{Temp: 4000, Brightness: 80}
